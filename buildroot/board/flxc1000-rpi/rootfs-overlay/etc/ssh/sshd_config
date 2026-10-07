@@ -1,0 +1,13 @@
+# Insecure test-system SSH configuration. Do not use outside an isolated lab.
+# flxc1000-init generates the host key on the persistent data partition.
+Port 22
+Protocol 2
+PermitRootLogin yes
+PasswordAuthentication yes
+PermitEmptyPasswords yes
+KbdInteractiveAuthentication yes
+ChallengeResponseAuthentication yes
+UsePAM no
+UseDNS no
+HostKey /data/ssh/ssh_host_ed25519_key
+PidFile /run/sshd.pid

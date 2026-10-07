@@ -20,6 +20,7 @@ fn main() {
     use std::ffi::CString;
     use std::fs;
     use std::path::Path;
+    use std::process::Command;
     use std::time::{Duration, Instant};
 
     use nix::mount::{mount, MsFlags};
@@ -30,38 +31,196 @@ fn main() {
     const APP_PARTITION: &str = "/dev/mmcblk0p2";
     const APP_MOUNT: &str = "/app";
     const BOOT_STATE_PATH: &str = "/data/boot_state";
-    const APP_BINARY: &str = "/app/flxc1000-app";
+    const APP_V1_BINARY: &str = "/app/flxc1000-app-v1";
+    const APP_V2_BINARY: &str = "/app/flxc1000-app-v2";
     const BOOT_BINARY: &str = "/boot/flxc1000-boot";
     const MMC_TIMEOUT: Duration = Duration::from_secs(10);
 
-    fn mount_pseudo_fs() {
-        let _ = fs::create_dir_all("/proc");
-        let _ = mount(
-            Some("proc"),
-            "/proc",
-            Some("proc"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-            None::<&str>,
-        );
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum AppSlot {
+            V1,
+            V2
+        }
 
-        let _ = fs::create_dir_all("/sys");
-        let _ = mount(
-            Some("sysfs"),
-            "/sys",
-            Some("sysfs"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-            None::<&str>,
-        );
-
-        let _ = fs::create_dir_all("/dev");
-        let _ = mount(
-            Some("devtmpfs"),
-            "/dev",
-            Some("devtmpfs"),
-            MsFlags::empty(),
-            None::<&str>,
-        );
+    #[derive(Debug)]
+    struct BootState {
+        active: AppSlot,
+        candidate: Option<AppSlot>,
+        bootloader_requested: bool,
     }
+
+    impl AppSlot {
+        fn binary_path(self) -> &'static str {
+            match self {
+                AppSlot::V1 => APP_V1_BINARY,
+                AppSlot::V2 => APP_V2_BINARY,
+            }
+        }
+
+        fn from_str(value: &str) -> Option<Self> {
+            match value {
+                "V1" => Some(AppSlot::V1),
+                "V2" => Some(AppSlot::V2),
+                _ => None,
+            }
+        }
+
+        fn as_str(self) -> &'static str {
+            match self {
+                AppSlot::V1 => "V1",
+                AppSlot::V2 => "V2",  
+            }
+        }
+    }
+
+    impl BootState {
+    fn initial() -> Self {
+        Self {
+            active: AppSlot::V1,
+            candidate: None,
+            bootloader_requested: false,
+        }
+    }
+
+    fn parse(contents: &str) -> Self {
+        let mut state = Self::initial();
+
+        for line in contents.lines() {
+            if let Some(value) = line.strip_prefix("active=") {
+                if let Some(slot) = AppSlot::from_str(value) {
+                    state.active = slot;
+                }
+            } else if let Some(value) = line.strip_prefix("candidate=") {
+                state.candidate = match value {
+                    "none" => None,
+                    other => AppSlot::from_str(other),
+                };
+            } else if let Some(value) = line.strip_prefix("mode=") {
+                state.bootloader_requested = value == "bootloader";
+            }
+        }
+
+        state
+    }
+
+    fn to_text(&self) -> String {
+        let candidate = match self.candidate {
+            Some(slot) => slot.as_str(),
+            None => "none",
+        };
+
+        let mode = if self.bootloader_requested {
+            "bootloader"
+        } else {
+            "application"
+        };
+
+        format!(
+            "active={}\ncandidate={}\nmode={}\n",
+            self.active.as_str(),
+            candidate,
+            mode
+
+        )
+    }
+}
+    fn write_boot_state(state: &BootState) -> Result<(), std::io::Error> {
+        fs::write(BOOT_STATE_PATH, state.to_text())
+    }
+
+    fn test_candidate(path: &str) -> bool {
+    eprintln!("[init] Starting candidate application: {}", path);
+
+    let mut child = match Command::new(path).spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("[init] Failed to start candidate: {}", e);
+            return false;
+        }
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "[init] Candidate exited during startup test: {}",
+                    status
+                );
+                return false;
+            }
+
+            Ok(None) => {
+                // Candidate is still running.
+            }
+
+            Err(e) => {
+                eprintln!("[init] Failed to check candidate: {}", e);
+                return false;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    eprintln!("[init] Candidate survived startup test");
+
+    // Stop the temporary validation process.
+    if let Err(e) = child.kill() {
+        eprintln!("[init] Failed to stop candidate test process: {}", e);
+        return false;
+    }
+
+    // Reap the stopped child process.
+    if let Err(e) = child.wait() {
+        eprintln!("[init] Failed to reap candidate test process: {}", e);
+        return false;
+    }
+
+    true
+}
+
+
+
+    fn mount_pseudo_fs() {
+    let _ = fs::create_dir_all("/proc");
+    let _ = mount(
+        Some("proc"),
+        "/proc",
+        Some("proc"),
+        MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        None::<&str>,
+    );
+
+    let _ = fs::create_dir_all("/sys");
+    let _ = mount(
+        Some("sysfs"),
+        "/sys",
+        Some("sysfs"),
+        MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        None::<&str>,
+    );
+
+    let _ = fs::create_dir_all("/dev");
+    let _ = mount(
+        Some("devtmpfs"),
+        "/dev",
+        Some("devtmpfs"),
+        MsFlags::empty(),
+        None::<&str>,
+    );
+
+    // Required for interactive SSH terminals
+    let _ = fs::create_dir_all("/dev/pts");
+    let _ = mount(
+        Some("devpts"),
+        "/dev/pts",
+        Some("devpts"),
+        MsFlags::empty(),
+        None::<&str>,
+    );
+}
 
     fn mount_partition(device: &str, target: &str, fstype: &str) -> Result<(), String> {
         let _ = fs::create_dir_all(target);
@@ -125,19 +284,85 @@ fn main() {
         exec_binary(BOOT_BINARY);
     }
 
-    let boot_state = fs::read_to_string(BOOT_STATE_PATH)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let boot_state_contents = fs::read_to_string(BOOT_STATE_PATH)
+        .unwrap_or_default();
+        
+    let boot_state = BootState::parse(&boot_state_contents);
 
     eprintln!("[init] boot_state = {:?}", boot_state);
 
-    if boot_state == "app_valid" && std::path::Path::new(APP_BINARY).exists() {
-        eprintln!("[init] Executing application: {}", APP_BINARY);
-        exec_binary(APP_BINARY);
-    } else {
-        eprintln!("[init] Executing bootloader: {}", BOOT_BINARY);
+    // Start SSH Server
+    if let Err(e) = Command::new("/usr/sbin/sshd").spawn() {
+       eprintln!("Failed to start start openssh server {:?}",e);
+     } 
+     else {
+        eprintln!("Succeded to start start openssh server");
+    }
+ 
+
+    if boot_state.bootloader_requested {
+        eprintln!("[init] Bootloader requested");
         exec_binary(BOOT_BINARY);
+    }
+
+    let mut boot_state = boot_state;
+
+if let Some(candidate) = boot_state.candidate {
+    let candidate_binary = candidate.binary_path();
+
+    eprintln!(
+        "[init] Candidate {:?} found: {}",
+        candidate,
+        candidate_binary
+    );
+
+    if Path::new(candidate_binary).exists() && test_candidate(candidate_binary) {
+        eprintln!("[init] Candidate {:?} passed startup test", candidate);
+
+        boot_state.active = candidate;
+        boot_state.candidate = None;
+        boot_state.bootloader_requested = false;
+
+        if let Err(e) = write_boot_state(&boot_state) {
+            eprintln!("[init] Failed to save successful candidate: {}", e);
+            exec_binary(BOOT_BINARY);
+        }
+
+        eprintln!("[init] Candidate {:?} is now active", candidate);
+    } else {
+        eprintln!(
+            "[init] Candidate {:?} failed — falling back to {:?}",
+            candidate,
+            boot_state.active
+        );
+
+        boot_state.candidate = None;
+        boot_state.bootloader_requested = false;
+
+        if let Err(e) = write_boot_state(&boot_state) {
+            eprintln!("[init] Failed to save rollback state: {}", e);
+            exec_binary(BOOT_BINARY);
+        }
+    }
+}
+
+let active_binary = boot_state.active.binary_path();
+
+if Path::new(active_binary).exists() {
+    eprintln!(
+        "[init] Executing active application {:?}: {}",
+        boot_state.active,
+        active_binary
+    );
+
+    exec_binary(active_binary);
+} else {
+    eprintln!(
+        "[init] Active application {:?} not found — falling back to bootloader",
+        boot_state.active
+    );
+
+    exec_binary(BOOT_BINARY);
     }
 }
 

@@ -17,6 +17,10 @@ device_tree=bcm2711-rpi-4-b.dtb
 # UART console
 enable_uart=1
 
-# GPU memory (100 MB — the value Buildroot uses for RPi4; 16 is too low
-# and causes a start*.elf boot failure)
+# I2C
+dtparam=i2c_arm=on
+
+# GPU memory (minimum safe value — 16 causes start.elf boot failure)
 gpu_mem=100
+
+
