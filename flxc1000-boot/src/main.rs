@@ -47,6 +47,9 @@ const APP_V1_BINARY: &str = "/app/flxc1000-app-v1";
 const APP_V2_BINARY: &str = "/app/flxc1000-app-v2";
 const BOOT_STATE_PATH: &str = "/data/boot_state";
 
+const APP_V1_DOWNLOAD: &str = "/app/flxc1000-app-v1.download";
+const APP_V2_DOWNLOAD: &str = "/app/flxc1000-app-v2.download";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppSlot {
     V1,
@@ -58,6 +61,13 @@ impl AppSlot {
         match self {
             AppSlot::V1 => APP_V1_BINARY,
             AppSlot::V2 => APP_V2_BINARY,
+        }
+    }
+
+    fn download_path(self) -> &'static str {
+        match self {
+            AppSlot::V1 => APP_V1_DOWNLOAD,
+            AppSlot::V2 => APP_V2_DOWNLOAD,
         }
     }
 
@@ -126,6 +136,35 @@ impl BootState {
     }
 }
 
+fn write_boot_state_to_path(
+    state: &BootState, 
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    let temporary_path = path.with_extension("tmp");
+
+    let mut file = File::create(&temporary_path)?;
+    file.write_all(state.to_text().as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    std::fs::rename(&temporary_path, path)?;
+
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+
+    Ok(())
+}
+
+fn write_boot_state_atomically(
+    state: &BootState,
+) -> std::io::Result<()> {
+    write_boot_state_to_path(
+        state,
+        std::path::Path::new(BOOT_STATE_PATH),
+    )
+} 
+
 fn validate_download_size(
     expected_size: usize,
     received_size: usize,
@@ -134,6 +173,41 @@ fn validate_download_size(
         return Err(BuiltinNrc::GeneralProgrammingFailure);
     }
     Ok(())
+}
+
+fn write_transfer_chunk(
+    file: &mut File,
+    received_size: &mut usize,
+    expected_size: usize,
+    data: &[u8],
+) -> Result <(), BuiltinNrc> {
+    // Check that this chunk fits within the expected size
+    if data.len() > expected_size.saturating_sub(*received_size) {
+        return Err(BuiltinNrc::GeneralProgrammingFailure);
+    }
+
+    // Write the actual bytes into the file. 
+    file.write_all(data)
+        .map_err(|_| BuiltinNrc::GeneralProgrammingFailure)?;
+
+    // Only update the counter after a succesfull write 
+    *received_size += data.len();
+
+    Ok(())
+}
+
+fn create_staged_download(
+    path: &std::path::Path, 
+) -> std::io::Result<File> {
+    File::create(path)
+}
+
+fn clear_candidate(
+    state: &mut BootState,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    state.candidate = None;
+    write_boot_state_to_path(state, path)
 }
 
 
@@ -233,9 +307,27 @@ impl ServerHandler for BootHandler {
 
         let boot_state = BootState::parse(&boot_state_contents);
 
+        // let target_slot = boot_state.active.other();
+        // let target_path = target_slot.binary_path();
+        // self.target_slot = Some(target_slot);
         let target_slot = boot_state.active.other();
-        let target_path = target_slot.binary_path();
-        self.target_slot = Some(target_slot);
+
+        //Write to the temporary download file
+        let target_path = target_slot.download_path();
+
+        let mut boot_state = boot_state;
+
+        clear_candidate(
+            &mut boot_state,
+            std::path::Path::new(BOOT_STATE_PATH),
+        )
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                "Failed to clear previous candidate"
+            );
+            BuiltinNrc::GeneralProgrammingFailure
+        })?;
 
         tracing::info!(
             active = ?boot_state.active,
@@ -244,13 +336,31 @@ impl ServerHandler for BootHandler {
             "RequestDownload: selected inactive application slot"
         );
 
-        let file = File::create(target_path)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to create inactibe application file");
+        // let file = File::create(target_path)
+        //     .map_err(|e| {
+        //         tracing::error!(error = %e, "Failed to create inactive application file");
+        //         BuiltinNrc::GeneralProgrammingFailure
+        //     })?;
+
+        // self.transfer_file = Some(file);
+
+        // Discard any previous in-memeory transfer
+        self.transfer_file = None;
+        self.target_slot = None; 
+
+        let file = create_staged_download(
+            std::path::Path::new(target_path)
+        ).map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    "Failed to create temporary download file"
+                );
+
                 BuiltinNrc::GeneralProgrammingFailure
             })?;
-
+        
         self.transfer_file = Some(file);
+        self.target_slot = Some(target_slot);
         
         //Start the update light show
         self.shared 
@@ -280,12 +390,19 @@ impl ServerHandler for BootHandler {
             .as_mut()
             .ok_or(BuiltinNrc::RequestSequenceError)?;
 
-        file.write_all(data).map_err(|e| {
-            tracing::error!(error = %e, "Failed to write update data");
-            BuiltinNrc::GeneralProgrammingFailure
-        })?;
+        // file.write_all(data).map_err(|e| {
+        //     tracing::error!(error = %e, "Failed to write update data");
+        //     BuiltinNrc::GeneralProgrammingFailure
+        // })?;
 
-        self.received_size += data.len();
+        // self.received_size += data.len();
+
+        write_transfer_chunk(
+            file,
+            &mut self.received_size,
+            self.expected_size,
+            data,
+        )?;
 
         tracing::info!(
             block = block_sequence_counter,
@@ -298,76 +415,154 @@ impl ServerHandler for BootHandler {
     }
 
     fn request_transfer_exit(
-        &mut self,
-        _parameter_record: &[u8],
-        _buf: &mut [u8],
-    ) -> Result<usize, BuiltinNrc> {
-        let file = self 
-            .transfer_file
-            .take()
-            .ok_or(BuiltinNrc::RequestSequenceError)?;
+    &mut self,
+    _parameter_record: &[u8],
+    _buf: &mut [u8],
+) -> Result<usize, BuiltinNrc> {
 
-        if let Err(error) = 
-            validate_download_size(self.expected_size, self.received_size)
-        {
+    // 1. Take ownership of the downloaded file.
+    let file = self
+        .transfer_file
+        .take()
+        .ok_or(BuiltinNrc::RequestSequenceError)?;
+
+    // Stop the update animation when the transfer exits,
+    // including if finalization fails.
+    self.shared
+        .update_active
+        .store(false, Ordering::Relaxed);
+
+    // 2. Verify that the complete binary was received.
+    if let Err(error) =
+        validate_download_size(self.expected_size, self.received_size)
+    {
+        tracing::error!(
+            expected = self.expected_size,
+            received = self.received_size,
+            "Transfer incomplete or invalid"
+        );
+
+        self.target_slot = None;
+
+        return Err(error);
+    }
+
+    // 3. Sync the downloaded data to storage.
+    file.sync_all().map_err(|e| {
+        tracing::error!(
+            error = %e,
+            "Failed to sync update file"
+        );
+
+        BuiltinNrc::GeneralProgrammingFailure
+    })?;
+
+    // Close the file before finalizing it.
+    drop(file);
+
+    // 4. Retrieve the inactive application slot.
+    let target_slot = self
+        .target_slot
+        .take()
+        .ok_or(BuiltinNrc::RequestSequenceError)?;
+
+    let download_path = target_slot.download_path();
+    let target_path = target_slot.binary_path();
+
+    // 5. Make the staged application executable.
+    let permissions =
+        std::fs::Permissions::from_mode(0o755);
+
+    std::fs::set_permissions(download_path, permissions)
+        .map_err(|e| {
             tracing::error!(
-                expected = self.expected_size,
-                received = self.received_size,
-                "Transfer incomplete or invalid"
+                error = %e,
+                "Failed to set downloaded application permissions"
             );
 
-            self.target_slot = None;
-            self.shared.update_active.store(false, Ordering::Relaxed);
-
-            return Err(error);
-        }
-        
-        file.sync_all().map_err(|e| {
-            tracing::error!(error = %e, "Failed to sync update file"); 
             BuiltinNrc::GeneralProgrammingFailure
         })?;
 
-        let target_slot = self
-            .target_slot
-            .take()
-            .ok_or(BuiltinNrc::RequestSequenceError)?;
+    // 6. Sync the file again after changing permissions.
+    File::open(download_path)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                "Failed to sync staged executable"
+            );
 
-        let target_path = target_slot.binary_path();
+            BuiltinNrc::GeneralProgrammingFailure
+        })?;
 
-        let permissions = std::fs::Permissions::from_mode(0o755);
-
-        std::fs::set_permissions(target_path, permissions)
+    // 7. Read and verify the current boot state before publishing.
+    let boot_state_contents =
+        std::fs::read_to_string(BOOT_STATE_PATH)
             .map_err(|e| {
-                tracing::error!(error = %e, "Failed to make application executable");
+                tracing::error!(
+                    error = %e,
+                    "Failed to read boot state"
+                );
+
                 BuiltinNrc::GeneralProgrammingFailure
             })?;
 
-        let boot_state_contents = std::fs::read_to_string(BOOT_STATE_PATH)
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to read about boot state");
-                BuiltinNrc::GeneralProgrammingFailure
-            })?;
+    let mut boot_state = BootState::parse(&boot_state_contents);
 
-        let mut boot_state = BootState::parse(&boot_state_contents);
+    // Never replace the currently active application.
+    if boot_state.active == target_slot {
+        tracing::error!(
+            "Target slot became active during download"
+        );
 
-        boot_state.candidate = Some(target_slot);
-
-        std::fs::write(BOOT_STATE_PATH, boot_state.to_text())
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to update boot state");
-                BuiltinNrc::GeneralProgrammingFailure
-            })?;
-
-        tracing::info!("TransferExit: update file successfully written");
-        //tracing::info!(total_bytes = self.transfer_buf.len(), "TransferExit (stub)");
-        //self.transfer_buf.clear();
-
-        self.shared 
-            .update_active
-            .store(false, Ordering::Relaxed);
-
-        Ok(0)
+        return Err(BuiltinNrc::GeneralProgrammingFailure);
     }
+
+    // 8. Finalize the binary in the inactive slot.
+    std::fs::rename(download_path, target_path)
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                "Failed to finalize application binary"
+            );
+
+            BuiltinNrc::GeneralProgrammingFailure
+        })?;
+
+    // 9. Persist the filesystem rename.
+    File::open("/app")
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                "Failed to sync application directory"
+            );
+
+            BuiltinNrc::GeneralProgrammingFailure
+        })?;
+
+    // 10. Mark the completed application as candidate.
+    boot_state.candidate = Some(target_slot);
+
+    write_boot_state_atomically(&boot_state)
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                "Failed to save candidate boot state"
+            );
+
+            BuiltinNrc::GeneralProgrammingFailure
+        })?;
+
+    tracing::info!(
+        target = ?target_slot,
+        expected = self.expected_size,
+        received = self.received_size,
+        "TransferExit: application finalized successfully"
+    );
+
+    Ok(0)
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -639,5 +834,170 @@ mod test {
             validate_download_size(expected_size, received_size);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_real_file_transfer() {
+        let path = std::env::temp_dir()
+            .join(format!("flxc-complete-{}.bin", std::process::id()));
+
+        let mut file = File::create(&path).unwrap();
+
+        let expected_size = 1000;
+        let mut received_size = 0;
+
+        //Simulate two UDS TransferData chunks
+        let chunk1 = vec![0xAA; 500];
+        let chunk2 = vec![0xBB; 500];
+
+        write_transfer_chunk(
+            &mut file, 
+            &mut received_size,
+            expected_size,
+            &chunk1,
+        ).unwrap();
+
+        write_transfer_chunk(
+            &mut file,
+            &mut received_size,
+            expected_size,
+            &chunk2,
+        ).unwrap();
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        //Check the actual data stored on the disk
+        let contents = std::fs::read(&path).unwrap();
+
+        assert_eq!(contents.len(), 1000);
+        assert_eq!(&contents[..500], chunk1.as_slice());
+        assert_eq!(&contents[500..], chunk2.as_slice());
+        assert_eq!(received_size, 1000);
+
+        assert!(validate_download_size(
+            expected_size,
+            received_size
+        ).is_ok());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_real_interrupted_transfer(){
+        let path = std::env::temp_dir()
+            .join(format!("flxc-interrupted-{}.bin", std::process::id()));
+
+        let mut file = File::create(&path).unwrap();
+
+        let expected_size = 1000;
+        let mut received_size = 0;
+
+        //Only 40% of the application arrives
+        let chunk = vec![0xAA; 400];
+
+        write_transfer_chunk(
+            &mut file, 
+            &mut received_size,
+            expected_size,
+            &chunk,
+        ).unwrap();
+
+        file.sync_all().unwrap();
+        drop(file);
+
+        //Verify all 400 bytes were stored 
+        let contents = std::fs::read(&path).unwrap();
+
+        assert_eq!(contents.len(), 400);
+        assert_eq!(contents, chunk);
+        assert_eq!(received_size, 400);
+
+        //Finalization must reject the incomplete download
+        assert!(validate_download_size(
+            expected_size,
+            received_size
+        ).is_err());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_download_paths_are_separated() {
+        assert_ne!(
+            AppSlot::V1.download_path(),
+            AppSlot::V1.binary_path()
+        );
+
+        assert_ne!(
+            AppSlot::V2.download_path(),
+            AppSlot::V2.binary_path()
+        );
+    }
+
+    #[test]
+    fn test_v1_v2_download_paths() {
+        assert_eq!(
+            AppSlot::V1.download_path(),
+            "/app/flxc1000-app-v1.download"
+        );
+    
+    assert_eq!(
+        AppSlot::V2.download_path(),
+        "/app/flxc1000-app-v2.download"
+    );
+    }
+
+    #[test]
+    fn test_interrupted_download_restart() {
+        use std::fs;
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "flxc-restart-{}",
+            std::process::id()
+        ));
+
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let final_path = test_dir.join("app-v2");
+
+    }
+
+    #[test]
+    fn test_interrupted_download_preserves_active_slot() {
+        use std::fs;
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "flxc-state-test-{}",
+            std::process::id()
+        ));
+
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let state_path = test_dir.join("boot_state");
+
+        //Start with V1 active and V2 selected as candidate
+        let mut state = BootState {
+            active: AppSlot::V1,
+            candidate: Some(AppSlot::V2),
+        };
+
+        write_boot_state_to_path(&state, &state_path).unwrap();
+
+        //Simulate RequestDownload preparing for another V2 update
+        clear_candidate(&mut state, &state_path).unwrap();
+
+        //Simulate an expected interruption
+        drop(state);
+
+        //Read the persisted state as fresh process would. 
+        let contents = fs::read_to_string(&state_path).unwrap();
+        let restored = BootState::parse(&contents);
+
+        assert_eq!(restored.active, AppSlot::V1);
+        assert_eq!(restored.candidate, None);
+
+        fs::remove_dir_all(test_dir).unwrap();
+
     }
 }
