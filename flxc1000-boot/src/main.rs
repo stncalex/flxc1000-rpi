@@ -16,7 +16,7 @@ use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::io::Write;
 use std::process;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool,AtomicU8, Ordering};
 use std::sync::Arc;
 
 use ace_server::config::*;
@@ -31,6 +31,8 @@ use flxc1000_doip::server::{get_mac_address, DoipConfig, DoipServer};
 
 const ECU_ADDRESS: u16 = 0x1000;
 const VIN: &[u8; 17] = b"FLXC1000TEST00001";
+
+mod rgb;
 
 /// Boot variant identification: DID 0xF100 = 0xFF0000
 const VARIANT_ID: [u8; 3] = [0xFF, 0x00, 0x00];
@@ -108,21 +110,32 @@ impl BootState {
             }
         state
     
+    }
+
+    fn to_text(&self) -> String {
+        let candidate = match self.candidate {
+            Some(slot) => slot.as_str(),
+            None => "none",
+        };
+
+        format!(
+            "active={}\ncandidate={}\nmode=application\n",
+            self.active.as_str(),
+            candidate
+        )
+    }
 }
 
-fn to_text(&self) -> String {
-    let candidate = match self.candidate {
-        Some(slot) => slot.as_str(),
-        None => "none",
-    };
+fn validate_download_size(
+    expected_size: usize,
+    received_size: usize,
+) -> Result<(), BuiltinNrc> {
+    if expected_size == 0 || received_size != expected_size {
+        return Err(BuiltinNrc::GeneralProgrammingFailure);
+    }
+    Ok(())
+}
 
-    format!(
-        "active={}\ncandidate={}\nmode=application\n",
-        self.active.as_str(),
-        candidate
-    )
-}
-}
 
 // ---------------------------------------------------------------------------
 // Shared state between handler (owned by UdsServer) and the main loop
@@ -131,6 +144,7 @@ fn to_text(&self) -> String {
 struct SharedState {
     pending_reset: AtomicU8,
     session_type: AtomicU8,
+    update_active: AtomicBool,
 }
 
 // ---------------------------------------------------------------------------
@@ -237,12 +251,20 @@ impl ServerHandler for BootHandler {
             })?;
 
         self.transfer_file = Some(file);
+        
+        //Start the update light show
+        self.shared 
+            .update_active 
+            .store(true, Ordering::Relaxed);
+
         // lengthFormatIdentifier: 0x20 (2 bytes for maxBlockLength)
         // maxNumberOfBlockLength: 0x0FFF (4095 bytes)
-        buf[0] = 0x20;
-        buf[1] = 0x0F;
-        buf[2] = 0xFF;
-        Ok(3)
+        buf[0] = 0x40;
+        buf[1] = 0x00;
+        buf[2] = 0x00;
+        buf[3] = 0x0F;
+        buf[4] = 0xFF;
+        Ok(5)
     }
 
     fn transfer_data(
@@ -285,14 +307,19 @@ impl ServerHandler for BootHandler {
             .take()
             .ok_or(BuiltinNrc::RequestSequenceError)?;
 
-        if self.received_size != self.expected_size {
+        if let Err(error) = 
+            validate_download_size(self.expected_size, self.received_size)
+        {
             tracing::error!(
                 expected = self.expected_size,
                 received = self.received_size,
-                "Transfer size mismatch"
+                "Transfer incomplete or invalid"
             );
 
-            return Err(BuiltinNrc::GeneralProgrammingFailure);
+            self.target_slot = None;
+            self.shared.update_active.store(false, Ordering::Relaxed);
+
+            return Err(error);
         }
         
         file.sync_all().map_err(|e| {
@@ -334,6 +361,11 @@ impl ServerHandler for BootHandler {
         tracing::info!("TransferExit: update file successfully written");
         //tracing::info!(total_bytes = self.transfer_buf.len(), "TransferExit (stub)");
         //self.transfer_buf.clear();
+
+        self.shared 
+            .update_active
+            .store(false, Ordering::Relaxed);
+
         Ok(0)
     }
 }
@@ -407,16 +439,12 @@ fn boot_server_config() -> ServerConfig {
 // ---------------------------------------------------------------------------
 
 fn do_hard_reset() -> ! {
-    let c_path = CString::new("/init").expect("invalid path");
-    let argv = [c_path.clone()];
-    let env: Vec<CString> = vec![
-        CString::new("PATH=/bin:/sbin").unwrap(),
-        CString::new("HOME=/").unwrap(),
-    ];
-    match nix::unistd::execve(&c_path, &argv, &env) {
+    tracing::info!("Performing real system reboot");
+
+    match nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_AUTOBOOT) {
         Ok(infallible) => match infallible {},
         Err(e) => {
-            tracing::error!("execve /init failed: {}", e);
+            tracing::error!("System reboot failed: {}", e);
             process::exit(1);
         }
     }
@@ -463,6 +491,10 @@ async fn main() {
         ECU_ADDRESS
     );
 
+    // if let Err(e) = rgb::white_test() {
+    //     tracing::warn!("RGB boot test failed: {}",e);
+    // }
+
     let mac = get_mac_address();
     tracing::info!(
         "EID (MAC): {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -481,7 +513,10 @@ async fn main() {
     let shared = Arc::new(SharedState {
         pending_reset: AtomicU8::new(RESET_NONE),
         session_type: AtomicU8::new(0x01),
+        update_active: AtomicBool::new(false),
     });
+
+    rgb::spawn_update_task(Arc::clone(&shared));
 
     let handler = BootHandler {
         shared: Arc::clone(&shared),
@@ -555,5 +590,54 @@ async fn main() {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_complete_download() {
+        let expected_size = 1000;
+        let received_size = 1000;
+
+        let result = 
+            validate_download_size(expected_size, received_size);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_interrupted_download() {
+        let expected_size = 1000; 
+        let received_size = 400;
+
+        let result = 
+            validate_download_size(expected_size, received_size);
+        
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_oversized_download() {
+        let expected_size = 1000;
+        let received_size = 1200; 
+
+        let result = 
+            validate_download_size(expected_size, received_size);
+        
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_download() {
+        let expected_size = 0;
+        let received_size = 0;
+
+        let result = 
+            validate_download_size(expected_size, received_size);
+
+        assert!(result.is_err());
     }
 }

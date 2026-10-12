@@ -14,35 +14,19 @@
 // This binary is Linux-only (PID 1 init for RPi4 initramfs).
 // It will not compile on macOS — cross-compile with:
 //   cargo zigbuild --target aarch64-unknown-linux-musl --release -p flxc1000-init
+    const APP_V1_BINARY: &str = "/app/flxc1000-app-v1";
+    const APP_V2_BINARY: &str = "/app/flxc1000-app-v2";
 
-#[cfg(target_os = "linux")]
-fn main() {
-    use std::ffi::CString;
-    use std::fs;
-    use std::path::Path;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use nix::mount::{mount, MsFlags};
-    use nix::unistd::execve;
-
-    const DATA_PARTITION: &str = "/dev/mmcblk0p3";
-    const DATA_MOUNT: &str = "/data";
-    const APP_PARTITION: &str = "/dev/mmcblk0p2";
-    const APP_MOUNT: &str = "/app";
-    const BOOT_STATE_PATH: &str = "/data/boot_state";
-    const APP_V1_BINARY: &str = "/app/flxc1000-app-v1";
-    const APP_V2_BINARY: &str = "/app/flxc1000-app-v2";
-    const BOOT_BINARY: &str = "/boot/flxc1000-boot";
-    const MMC_TIMEOUT: Duration = Duration::from_secs(10);
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum AppSlot {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AppSlot {
             V1,
             V2
         }
 
-    #[derive(Debug)]
+            #[derive(Debug)]
     struct BootState {
         active: AppSlot,
         candidate: Option<AppSlot>,
@@ -124,11 +108,22 @@ fn main() {
         )
     }
 }
-    fn write_boot_state(state: &BootState) -> Result<(), std::io::Error> {
-        fs::write(BOOT_STATE_PATH, state.to_text())
-    }
 
-    fn test_candidate(path: &str) -> bool {
+fn apply_candidate_result(
+    state: &mut BootState,
+    succesful: bool,
+) {
+    if let Some(candidate) = state.candidate {
+        if succesful {
+            state.active = candidate;
+        }
+
+        state.candidate = None; 
+        state.bootloader_requested = false;
+    }
+}
+
+fn test_candidate(path: &str) -> bool {
     eprintln!("[init] Starting candidate application: {}", path);
 
     let mut child = match Command::new(path).spawn() {
@@ -138,7 +133,7 @@ fn main() {
             return false;
         }
     };
-
+    
     let deadline = Instant::now() + Duration::from_secs(2);
 
     while Instant::now() < deadline {
@@ -182,6 +177,25 @@ fn main() {
 }
 
 
+#[cfg(target_os = "linux")]
+fn main() {
+    use std::ffi::CString;
+    use std::fs;
+    use std::path::Path;
+    use nix::mount::{mount, MsFlags};
+    use nix::unistd::execve;
+
+    const DATA_PARTITION: &str = "/dev/mmcblk0p3";
+    const DATA_MOUNT: &str = "/data";
+    const APP_PARTITION: &str = "/dev/mmcblk0p2";
+    const APP_MOUNT: &str = "/app";
+    const BOOT_STATE_PATH: &str = "/data/boot_state";
+    const BOOT_BINARY: &str = "/boot/flxc1000-boot";
+    const MMC_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn write_boot_state(state: &BootState) -> Result<(), std::io::Error> {
+        fs::write(BOOT_STATE_PATH, state.to_text())
+    }
 
     fn mount_pseudo_fs() {
     let _ = fs::create_dir_all("/proc");
@@ -319,9 +333,10 @@ if let Some(candidate) = boot_state.candidate {
     if Path::new(candidate_binary).exists() && test_candidate(candidate_binary) {
         eprintln!("[init] Candidate {:?} passed startup test", candidate);
 
-        boot_state.active = candidate;
-        boot_state.candidate = None;
-        boot_state.bootloader_requested = false;
+        // boot_state.active = candidate;
+        // boot_state.candidate = None;
+        // boot_state.bootloader_requested = false;
+        apply_candidate_result(&mut boot_state, true);
 
         if let Err(e) = write_boot_state(&boot_state) {
             eprintln!("[init] Failed to save successful candidate: {}", e);
@@ -336,8 +351,9 @@ if let Some(candidate) = boot_state.candidate {
             boot_state.active
         );
 
-        boot_state.candidate = None;
-        boot_state.bootloader_requested = false;
+        // boot_state.candidate = None;
+        // boot_state.bootloader_requested = false;
+        apply_candidate_result(&mut boot_state, false);
 
         if let Err(e) = write_boot_state(&boot_state) {
             eprintln!("[init] Failed to save rollback state: {}", e);
@@ -366,9 +382,147 @@ if Path::new(active_binary).exists() {
     }
 }
 
+
+
 #[cfg(not(target_os = "linux"))]
 fn main() {
     eprintln!("flxc1000-init is Linux-only. Cross-compile with:");
     eprintln!("  cargo zigbuild --target aarch64-unknown-linux-musl --release -p flxc1000-init");
     std::process::exit(1);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_boot_state_parsing() {
+        let state = BootState::parse(
+            "active=V2\ncandidate=V1\nmode=application"
+        );
+
+    // Simulate failed candidate validation 
+    assert_eq!(state.active, AppSlot::V2);
+    assert_eq!(state.candidate, Some(AppSlot::V1));
+    assert!(!state.bootloader_requested);
+    }
+
+    #[test]
+    fn test_succesful_update_state() {
+        let mut state = BootState::parse(
+          "active=V2\ncandidate=V1\nmode=application"  
+        );
+
+        apply_candidate_result(&mut state, true);
+
+        assert_eq!(state.active, AppSlot::V1);
+        assert_eq!(state.candidate, None);
+        assert!(!state.bootloader_requested);
+    }
+
+    #[test]
+    fn test_rollback_state() {
+        let mut state = BootState::parse(
+            "active=V2\ncandidate=V1\nmode=application\n"
+        );
+
+        apply_candidate_result(&mut state, false);
+
+        assert_eq!(state.active, AppSlot::V2);
+        assert_eq!(state.candidate, None);
+        assert!(!state.bootloader_requested);
+    }
+
+    #[test]
+    fn test_boot_state_serialization() {
+        let state = BootState::parse(
+            "active=V2\ncandidate=none\nmode=application\n"
+        );
+
+        assert_eq!(
+            state.to_text(),
+            "active=V2\ncandidate=none\nmode=application\n"
+        );
+    }
+
+    #[test]
+    fn test_v1_to_v2_success() {
+        let mut state = BootState::parse(
+            "active=V1\ncandidate=V2\nmode=application\n"
+        );
+
+        apply_candidate_result(&mut state, true);
+
+        assert_eq!(state.active, AppSlot::V2);
+        assert_eq!(state.candidate, None);
+        assert!(!state.bootloader_requested);
+    }
+
+    #[test]
+    fn test_v1_to_v2_rollback() {
+        let mut state = BootState::parse(
+            "active=V1\ncandidate=V2\nmode=application\n"
+        );
+
+        apply_candidate_result(&mut state, false);
+
+        assert_eq!(state.active, AppSlot::V1);
+        assert_eq!(state.candidate, None);
+        assert!(!state.bootloader_requested);
+    }
+
+
+#[cfg(target_os = "linux")]
+#[test]
+    fn test_candidate_accepts_running_application() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("flxc-good-{}", std::process::id()));
+
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 10\n").unwrap();
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let result = test_candidate(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result, "Working candidate should be accepted");
+    }
+
+#[cfg(target_os = "linux")]
+#[test]
+    fn test_candidate_rejects_crashing_application() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("flxc-bad-{}", std::process::id()));
+
+        std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let result = test_candidate(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(!result, "Crashing candidate should be rejected");
+    }
+
+#[cfg(target_os = "linux")]
+#[test]
+
+    fn test_candidate_rejects_missing_applications() {
+        let result = test_candidate(
+            "/tmp/flxc1000-nonexistent-test-application"
+        );
+
+        assert!(!result, "Missing candidate should be rejected");
+    }
+}
+
