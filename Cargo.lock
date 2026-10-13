@@ -387,6 +387,7 @@ dependencies = [
  "flxc1000-doip",
  "heapless",
  "nix",
+ "rs_ws281x",
  "tokio",
  "tracing",
  "tracing-subscriber",

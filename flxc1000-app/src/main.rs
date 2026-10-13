@@ -14,7 +14,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::process;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -100,22 +100,25 @@ struct SharedState {
 
     //Bits 0-7 represent the eight old LEDs.
     rgb_led_mask: AtomicU8,
+    diagnostic_activity: AtomicBool,
 
     //gpio: Option<rppal::gpio::Gpio>,
     flux_capacitor_power: i32,
-    flux_state: AtomicU8, 
+    flux_state: AtomicU8,
     last_error: Mutex<Option<String>>,
 }
 
 impl SharedState {
-
     fn set_last_error(&self, msg: impl Into<String>) {
-    let msh: String = msg.into().chars().take(42).collect();
+        let msh: String = msg.into().chars().take(42).collect();
 
-    if let Ok(mut last_error) = self.last_error.lock() {
-        *last_error = Some(msh);
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(msh);
+        }
     }
-}
+    fn signal_diagnostic_activity(&self) {
+        self.diagnostic_activity.store(true, Ordering::Relaxed);
+    }
 
     // /// Set a single LED on or off (full brightness, no PWM).
     // fn set_led(&self, index: usize, high: bool) {
@@ -143,7 +146,7 @@ impl SharedState {
     //     }
     // }
     fn set_led(&self, index: usize, high: bool) {
-        if index >=8 {
+        if index >= 8 {
             return;
         }
 
@@ -160,7 +163,7 @@ impl SharedState {
         self.rgb_led_mask.store(0, Ordering::SeqCst);
     }
 
-    fn pulse_led(&self, index: usize, duration_ms: u64){
+    fn pulse_led(&self, index: usize, duration_ms: u64) {
         self.set_led(index, true);
         std::thread::sleep(Duration::from_millis(duration_ms));
         self.set_led(index, false);
@@ -266,13 +269,12 @@ impl SharedState {
     //     tracing::info!("SelfTest LED cascade completed");
     // }
 
-    fn led_cascade_test(&self){
-        self.routine_status
-            .store(ROUTINE_RUNNING, Ordering::SeqCst);
+    fn led_cascade_test(&self) {
+        self.routine_status.store(ROUTINE_RUNNING, Ordering::SeqCst);
 
         self.all_leds_off();
 
-        //Light logical LEDs 1-> 8 progressively. 
+        //Light logical LEDs 1-> 8 progressively.
         for i in 0..8 {
             if self.routine_status.load(Ordering::SeqCst) == ROUTINE_ABORTED {
                 tracing::info!("SelfTest aborted during cascade");
@@ -288,13 +290,12 @@ impl SharedState {
         std::thread::sleep(Duration::from_millis(200));
 
         self.all_leds_off();
-        
+
         self.routine_status
             .store(ROUTINE_COMPLETED, Ordering::SeqCst);
 
         tracing::info!("RGB SelfTest cascade completed");
     }
-
 
     /// Boot-up blink: flash all 8 LEDs twice to signal the app is ready.
     fn boot_blink(&self) {
@@ -343,7 +344,7 @@ impl ServerHandler for AppHandler {
                 let bytes = self.shared.flux_capacitor_power.to_be_bytes();
                 buf[..4].copy_from_slice(&bytes);
                 self.shared.set_led(0, false);
-                
+
                 self.shared.flux_state.store(FLUX_READY, Ordering::SeqCst);
 
                 Ok(4)
@@ -371,16 +372,20 @@ impl ServerHandler for AppHandler {
         match reset_type {
             0x01 => {
                 tracing::info!("ECUReset HardReset — switching to bootloader");
-                    if let Err(e) = request_bootloader() {
+
+                if let Err(e) = request_bootloader() {
                     self.shared.set_last_error(format!("boot_state: {e}"));
                     tracing::error!("Failed to write boot_state: {}", e);
                     return Err(BuiltinNrc::ConditionsNotCorrect);
                 }
+
                 self.shared
                     .pending_reset
                     .store(RESET_HARD, Ordering::SeqCst);
+
                 Ok(())
             }
+
             _ => Err(BuiltinNrc::SubFunctionNotSupported),
         }
     }
@@ -526,10 +531,12 @@ fn app_server_config() -> ServerConfig {
 fn do_hard_reset() -> ! {
     let c_path = CString::new("/init").expect("invalid path");
     let argv = [c_path.clone()];
+
     let env: Vec<CString> = vec![
         CString::new("PATH=/bin:/sbin").unwrap(),
         CString::new("HOME=/").unwrap(),
     ];
+
     match nix::unistd::execve(&c_path, &argv, &env) {
         Ok(infallible) => match infallible {},
         Err(e) => {
@@ -607,6 +614,7 @@ async fn main() {
         pending_reset: AtomicU8::new(RESET_NONE),
         session_type: AtomicU8::new(0x01),
         routine_status: AtomicU8::new(ROUTINE_IDLE),
+        diagnostic_activity: AtomicBool::new(false),
         vin: Mutex::new(*VIN),
         dtcs: Mutex::new(vec![
             Dtc {
@@ -622,7 +630,7 @@ async fn main() {
         rgb_led_mask: AtomicU8::new(0),
         flux_capacitor_power: 1210, // 1.21 GW
         flux_state: AtomicU8::new(FLUX_READY),
-        last_error: Mutex::new(None)
+        last_error: Mutex::new(None),
     });
 
     let handler = AppHandler {
@@ -654,6 +662,9 @@ async fn main() {
             data = format_args!("{:02X?}", &req.data),
             "UDS request"
         );
+
+        //Trigger communication light show
+        shared.signal_diagnostic_activity();
 
         let now = ace_now(&boot_time);
         shared

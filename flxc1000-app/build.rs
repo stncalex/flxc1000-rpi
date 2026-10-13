@@ -1,6 +1,6 @@
-use std::process::Command; 
+use std::process::Command;
 
-fn main()   {
+fn main() {
     println!("cargo:rerun-if-env-changed=FLXC1000_VERSION");
     println!("cargo:rerun-if-changed=../.git/HEAD");
 
@@ -13,13 +13,12 @@ fn main()   {
 }
 
 fn git_version() -> Option<String> {
-
     let output = Command::new("git")
         .args(["describe", "--tags", "--always", "--dirty"])
         .output()
         .ok()?;
 
-    if !output.status.success   () {
+    if !output.status.success() {
         return None;
     }
 
