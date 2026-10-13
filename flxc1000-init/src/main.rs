@@ -14,50 +14,50 @@
 // This binary is Linux-only (PID 1 init for RPi4 initramfs).
 // It will not compile on macOS — cross-compile with:
 //   cargo zigbuild --target aarch64-unknown-linux-musl --release -p flxc1000-init
-    const APP_V1_BINARY: &str = "/app/flxc1000-app-v1";
-    const APP_V2_BINARY: &str = "/app/flxc1000-app-v2";
+const APP_V1_BINARY: &str = "/app/flxc1000-app-v1";
+const APP_V2_BINARY: &str = "/app/flxc1000-app-v2";
 
-    use std::process::Command;
-    use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum AppSlot {
-            V1,
-            V2
-        }
+enum AppSlot {
+    V1,
+    V2,
+}
 
-            #[derive(Debug)]
-    struct BootState {
-        active: AppSlot,
-        candidate: Option<AppSlot>,
-        bootloader_requested: bool,
-    }
+#[derive(Debug)]
+struct BootState {
+    active: AppSlot,
+    candidate: Option<AppSlot>,
+    bootloader_requested: bool,
+}
 
-    impl AppSlot {
-        fn binary_path(self) -> &'static str {
-            match self {
-                AppSlot::V1 => APP_V1_BINARY,
-                AppSlot::V2 => APP_V2_BINARY,
-            }
-        }
-
-        fn from_str(value: &str) -> Option<Self> {
-            match value {
-                "V1" => Some(AppSlot::V1),
-                "V2" => Some(AppSlot::V2),
-                _ => None,
-            }
-        }
-
-        fn as_str(self) -> &'static str {
-            match self {
-                AppSlot::V1 => "V1",
-                AppSlot::V2 => "V2",  
-            }
+impl AppSlot {
+    fn binary_path(self) -> &'static str {
+        match self {
+            AppSlot::V1 => APP_V1_BINARY,
+            AppSlot::V2 => APP_V2_BINARY,
         }
     }
 
-    impl BootState {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "V1" => Some(AppSlot::V1),
+            "V2" => Some(AppSlot::V2),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            AppSlot::V1 => "V1",
+            AppSlot::V2 => "V2",
+        }
+    }
+}
+
+impl BootState {
     fn initial() -> Self {
         Self {
             active: AppSlot::V1,
@@ -104,21 +104,17 @@
             self.active.as_str(),
             candidate,
             mode
-
         )
     }
 }
 
-fn apply_candidate_result(
-    state: &mut BootState,
-    succesful: bool,
-) {
+fn apply_candidate_result(state: &mut BootState, succesful: bool) {
     if let Some(candidate) = state.candidate {
         if succesful {
             state.active = candidate;
         }
 
-        state.candidate = None; 
+        state.candidate = None;
         state.bootloader_requested = false;
     }
 }
@@ -133,16 +129,13 @@ fn test_candidate(path: &str) -> bool {
             return false;
         }
     };
-    
+
     let deadline = Instant::now() + Duration::from_secs(2);
 
     while Instant::now() < deadline {
         match child.try_wait() {
             Ok(Some(status)) => {
-                eprintln!(
-                    "[init] Candidate exited during startup test: {}",
-                    status
-                );
+                eprintln!("[init] Candidate exited during startup test: {}", status);
                 return false;
             }
 
@@ -176,14 +169,13 @@ fn test_candidate(path: &str) -> bool {
     true
 }
 
-
 #[cfg(target_os = "linux")]
 fn main() {
+    use nix::mount::{mount, MsFlags};
+    use nix::unistd::execve;
     use std::ffi::CString;
     use std::fs;
     use std::path::Path;
-    use nix::mount::{mount, MsFlags};
-    use nix::unistd::execve;
 
     const DATA_PARTITION: &str = "/dev/mmcblk0p3";
     const DATA_MOUNT: &str = "/data";
@@ -198,43 +190,43 @@ fn main() {
     }
 
     fn mount_pseudo_fs() {
-    let _ = fs::create_dir_all("/proc");
-    let _ = mount(
-        Some("proc"),
-        "/proc",
-        Some("proc"),
-        MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        None::<&str>,
-    );
+        let _ = fs::create_dir_all("/proc");
+        let _ = mount(
+            Some("proc"),
+            "/proc",
+            Some("proc"),
+            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            None::<&str>,
+        );
 
-    let _ = fs::create_dir_all("/sys");
-    let _ = mount(
-        Some("sysfs"),
-        "/sys",
-        Some("sysfs"),
-        MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        None::<&str>,
-    );
+        let _ = fs::create_dir_all("/sys");
+        let _ = mount(
+            Some("sysfs"),
+            "/sys",
+            Some("sysfs"),
+            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            None::<&str>,
+        );
 
-    let _ = fs::create_dir_all("/dev");
-    let _ = mount(
-        Some("devtmpfs"),
-        "/dev",
-        Some("devtmpfs"),
-        MsFlags::empty(),
-        None::<&str>,
-    );
+        let _ = fs::create_dir_all("/dev");
+        let _ = mount(
+            Some("devtmpfs"),
+            "/dev",
+            Some("devtmpfs"),
+            MsFlags::empty(),
+            None::<&str>,
+        );
 
-    // Required for interactive SSH terminals
-    let _ = fs::create_dir_all("/dev/pts");
-    let _ = mount(
-        Some("devpts"),
-        "/dev/pts",
-        Some("devpts"),
-        MsFlags::empty(),
-        None::<&str>,
-    );
-}
+        // Required for interactive SSH terminals
+        let _ = fs::create_dir_all("/dev/pts");
+        let _ = mount(
+            Some("devpts"),
+            "/dev/pts",
+            Some("devpts"),
+            MsFlags::empty(),
+            None::<&str>,
+        );
+    }
 
     fn mount_partition(device: &str, target: &str, fstype: &str) -> Result<(), String> {
         let _ = fs::create_dir_all(target);
@@ -298,21 +290,18 @@ fn main() {
         exec_binary(BOOT_BINARY);
     }
 
-    let boot_state_contents = fs::read_to_string(BOOT_STATE_PATH)
-        .unwrap_or_default();
-        
+    let boot_state_contents = fs::read_to_string(BOOT_STATE_PATH).unwrap_or_default();
+
     let boot_state = BootState::parse(&boot_state_contents);
 
     eprintln!("[init] boot_state = {:?}", boot_state);
 
     // Start SSH Server
     if let Err(e) = Command::new("/usr/sbin/sshd").spawn() {
-       eprintln!("Failed to start start openssh server {:?}",e);
-     } 
-     else {
+        eprintln!("Failed to start start openssh server {:?}", e);
+    } else {
         eprintln!("Succeded to start start openssh server");
     }
- 
 
     if boot_state.bootloader_requested {
         eprintln!("[init] Bootloader requested");
@@ -321,68 +310,63 @@ fn main() {
 
     let mut boot_state = boot_state;
 
-if let Some(candidate) = boot_state.candidate {
-    let candidate_binary = candidate.binary_path();
+    if let Some(candidate) = boot_state.candidate {
+        let candidate_binary = candidate.binary_path();
 
-    eprintln!(
-        "[init] Candidate {:?} found: {}",
-        candidate,
-        candidate_binary
-    );
+        eprintln!(
+            "[init] Candidate {:?} found: {}",
+            candidate, candidate_binary
+        );
 
-    if Path::new(candidate_binary).exists() && test_candidate(candidate_binary) {
-        eprintln!("[init] Candidate {:?} passed startup test", candidate);
+        if Path::new(candidate_binary).exists() && test_candidate(candidate_binary) {
+            eprintln!("[init] Candidate {:?} passed startup test", candidate);
 
-        // boot_state.active = candidate;
-        // boot_state.candidate = None;
-        // boot_state.bootloader_requested = false;
-        apply_candidate_result(&mut boot_state, true);
+            // boot_state.active = candidate;
+            // boot_state.candidate = None;
+            // boot_state.bootloader_requested = false;
+            apply_candidate_result(&mut boot_state, true);
 
-        if let Err(e) = write_boot_state(&boot_state) {
-            eprintln!("[init] Failed to save successful candidate: {}", e);
-            exec_binary(BOOT_BINARY);
+            if let Err(e) = write_boot_state(&boot_state) {
+                eprintln!("[init] Failed to save successful candidate: {}", e);
+                exec_binary(BOOT_BINARY);
+            }
+
+            eprintln!("[init] Candidate {:?} is now active", candidate);
+        } else {
+            eprintln!(
+                "[init] Candidate {:?} failed — falling back to {:?}",
+                candidate, boot_state.active
+            );
+
+            // boot_state.candidate = None;
+            // boot_state.bootloader_requested = false;
+            apply_candidate_result(&mut boot_state, false);
+
+            if let Err(e) = write_boot_state(&boot_state) {
+                eprintln!("[init] Failed to save rollback state: {}", e);
+                exec_binary(BOOT_BINARY);
+            }
         }
+    }
 
-        eprintln!("[init] Candidate {:?} is now active", candidate);
+    let active_binary = boot_state.active.binary_path();
+
+    if Path::new(active_binary).exists() {
+        eprintln!(
+            "[init] Executing active application {:?}: {}",
+            boot_state.active, active_binary
+        );
+
+        exec_binary(active_binary);
     } else {
         eprintln!(
-            "[init] Candidate {:?} failed — falling back to {:?}",
-            candidate,
+            "[init] Active application {:?} not found — falling back to bootloader",
             boot_state.active
         );
 
-        // boot_state.candidate = None;
-        // boot_state.bootloader_requested = false;
-        apply_candidate_result(&mut boot_state, false);
-
-        if let Err(e) = write_boot_state(&boot_state) {
-            eprintln!("[init] Failed to save rollback state: {}", e);
-            exec_binary(BOOT_BINARY);
-        }
+        exec_binary(BOOT_BINARY);
     }
 }
-
-let active_binary = boot_state.active.binary_path();
-
-if Path::new(active_binary).exists() {
-    eprintln!(
-        "[init] Executing active application {:?}: {}",
-        boot_state.active,
-        active_binary
-    );
-
-    exec_binary(active_binary);
-} else {
-    eprintln!(
-        "[init] Active application {:?} not found — falling back to bootloader",
-        boot_state.active
-    );
-
-    exec_binary(BOOT_BINARY);
-    }
-}
-
-
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -397,21 +381,17 @@ mod tests {
 
     #[test]
     fn test_boot_state_parsing() {
-        let state = BootState::parse(
-            "active=V2\ncandidate=V1\nmode=application"
-        );
+        let state = BootState::parse("active=V2\ncandidate=V1\nmode=application");
 
-    // Simulate failed candidate validation 
-    assert_eq!(state.active, AppSlot::V2);
-    assert_eq!(state.candidate, Some(AppSlot::V1));
-    assert!(!state.bootloader_requested);
+        // Simulate failed candidate validation
+        assert_eq!(state.active, AppSlot::V2);
+        assert_eq!(state.candidate, Some(AppSlot::V1));
+        assert!(!state.bootloader_requested);
     }
 
     #[test]
     fn test_succesful_update_state() {
-        let mut state = BootState::parse(
-          "active=V2\ncandidate=V1\nmode=application"  
-        );
+        let mut state = BootState::parse("active=V2\ncandidate=V1\nmode=application");
 
         apply_candidate_result(&mut state, true);
 
@@ -422,9 +402,7 @@ mod tests {
 
     #[test]
     fn test_rollback_state() {
-        let mut state = BootState::parse(
-            "active=V2\ncandidate=V1\nmode=application\n"
-        );
+        let mut state = BootState::parse("active=V2\ncandidate=V1\nmode=application\n");
 
         apply_candidate_result(&mut state, false);
 
@@ -435,9 +413,7 @@ mod tests {
 
     #[test]
     fn test_boot_state_serialization() {
-        let state = BootState::parse(
-            "active=V2\ncandidate=none\nmode=application\n"
-        );
+        let state = BootState::parse("active=V2\ncandidate=none\nmode=application\n");
 
         assert_eq!(
             state.to_text(),
@@ -447,9 +423,7 @@ mod tests {
 
     #[test]
     fn test_v1_to_v2_success() {
-        let mut state = BootState::parse(
-            "active=V1\ncandidate=V2\nmode=application\n"
-        );
+        let mut state = BootState::parse("active=V1\ncandidate=V2\nmode=application\n");
 
         apply_candidate_result(&mut state, true);
 
@@ -460,9 +434,7 @@ mod tests {
 
     #[test]
     fn test_v1_to_v2_rollback() {
-        let mut state = BootState::parse(
-            "active=V1\ncandidate=V2\nmode=application\n"
-        );
+        let mut state = BootState::parse("active=V1\ncandidate=V2\nmode=application\n");
 
         apply_candidate_result(&mut state, false);
 
@@ -471,9 +443,8 @@ mod tests {
         assert!(!state.bootloader_requested);
     }
 
-
-#[cfg(target_os = "linux")]
-#[test]
+    #[cfg(target_os = "linux")]
+    #[test]
     fn test_candidate_accepts_running_application() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -493,8 +464,8 @@ mod tests {
         assert!(result, "Working candidate should be accepted");
     }
 
-#[cfg(target_os = "linux")]
-#[test]
+    #[cfg(target_os = "linux")]
+    #[test]
     fn test_candidate_rejects_crashing_application() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -514,15 +485,12 @@ mod tests {
         assert!(!result, "Crashing candidate should be rejected");
     }
 
-#[cfg(target_os = "linux")]
-#[test]
+    #[cfg(target_os = "linux")]
+    #[test]
 
     fn test_candidate_rejects_missing_applications() {
-        let result = test_candidate(
-            "/tmp/flxc1000-nonexistent-test-application"
-        );
+        let result = test_candidate("/tmp/flxc1000-nonexistent-test-application");
 
         assert!(!result, "Missing candidate should be rejected");
     }
 }
-
