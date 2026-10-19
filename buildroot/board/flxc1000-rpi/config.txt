@@ -20,3 +20,8 @@ enable_uart=1
 # GPU memory (100 MB — the value Buildroot uses for RPi4; 16 is too low
 # and causes a start*.elf boot failure)
 gpu_mem=100
+# I2C
+dtparam=i2c_arm=on
+
+
+

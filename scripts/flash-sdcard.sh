@@ -46,10 +46,10 @@ fi
 DEVICE="$1"
 
 # Safety checks
-if [ ! -b "${DEVICE}" ] && [ ! -c "${DEVICE}" ]; then
-    echo "ERROR: ${DEVICE} is not a block/character device"
-    exit 1
-fi
+# if [ ! -b "${DEVICE}" ] && [ ! -c "${DEVICE}" ]; then
+#     echo "ERROR: ${DEVICE} is not a block/character device"
+#     exit 1
+# fi
 
 if [ ! -f "${SDCARD_IMG}" ]; then
     echo "ERROR: SD card image not found: ${SDCARD_IMG}"

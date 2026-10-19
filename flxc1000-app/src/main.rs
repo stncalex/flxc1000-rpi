@@ -65,6 +65,22 @@ const FLUX_READY: u8 = 0x00;
 const FLUX_READING: u8 = 0x01;
 const FLUX_ERROR: u8 = 0x02;
 
+fn request_bootloader() -> std::io::Result<()> {
+    let contents = fs::read_to_string(BOOT_STATE_PATH)?;
+
+    let mut new_contents = String::new();
+
+    for line in contents.lines() {
+        if line.starts_with("mode=") {
+            new_contents.push_str("mode=bootloader\n");
+        } else {
+            new_contents.push_str(line);
+            new_contents.push('\n');
+        }
+    }
+
+    fs::write(BOOT_STATE_PATH, new_contents)
+}
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -356,15 +372,20 @@ impl ServerHandler for AppHandler {
         match reset_type {
             0x01 => {
                 tracing::info!("ECUReset HardReset — switching to bootloader");
-                if let Err(e) = fs::write(BOOT_STATE_PATH, "boot_requested\n") {
+
+                if let Err(e) = request_bootloader() {
+                    self.shared.set_last_error(format!("boot_state: {e}"));
                     tracing::error!("Failed to write boot_state: {}", e);
                     return Err(BuiltinNrc::ConditionsNotCorrect);
                 }
+
                 self.shared
                     .pending_reset
                     .store(RESET_HARD, Ordering::SeqCst);
+
                 Ok(())
             }
+
             _ => Err(BuiltinNrc::SubFunctionNotSupported),
         }
     }
@@ -510,10 +531,12 @@ fn app_server_config() -> ServerConfig {
 fn do_hard_reset() -> ! {
     let c_path = CString::new("/init").expect("invalid path");
     let argv = [c_path.clone()];
+
     let env: Vec<CString> = vec![
         CString::new("PATH=/bin:/sbin").unwrap(),
         CString::new("HOME=/").unwrap(),
     ];
+
     match nix::unistd::execve(&c_path, &argv, &env) {
         Ok(infallible) => match infallible {},
         Err(e) => {
@@ -539,7 +562,7 @@ fn ace_now(boot: &std::time::Instant) -> AceInstant {
 async fn main() {
     // To enable persistent logging (pull SD card and read /data/debug.log), set
     // LOG_TO_FILE to true. Disabled by default to reduce flash wear.
-    const LOG_TO_FILE: bool = false;
+    const LOG_TO_FILE: bool = true;
 
     if LOG_TO_FILE {
         if let Ok(f) = fs::OpenOptions::new()
