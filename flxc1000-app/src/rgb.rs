@@ -23,6 +23,65 @@ const BRANCH_COUNT: usize = 3;
 const BRANCH_LENGTH: usize = 8;
 const ANIMATION_DELAY_MS: u64 = 90;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LedVariant {
+    Blue,
+    Green,
+}
+
+struct IdleColors {
+    background: [u8; 4],
+    pulse: [u8; 4],
+    trail_1: [u8; 4],
+    trail_2: [u8; 4],
+    center: [u8; 4],
+}
+
+impl LedVariant {
+    fn colors(self) -> IdleColors {
+        match self {
+            LedVariant::Blue => IdleColors {
+                background: [5, 15, 30, 0],
+                pulse: [120, 220, 255, 0],
+                trail_1: [50, 120, 200, 0],
+                trail_2: [15, 45, 90, 0],
+                center: [180, 255, 255, 0],
+            },
+
+            LedVariant::Green => IdleColors {
+                background: [5, 30, 5, 0],
+                pulse: [80, 255, 100, 0],
+                trail_1: [30, 180, 50, 0],
+                trail_2: [10, 80, 20, 0],
+                center: [150, 255, 150, 0],
+            },
+        }
+    }
+}
+
+const VARIANT_CONFIG_PATH: &str = "/data/variant.conf";
+
+fn load_variant() -> LedVariant {
+    match std::fs::read_to_string(VARIANT_CONFIG_PATH) {
+        Ok(value) => parse_variant(&value),
+        Err(_) => {
+            tracing::info!("No variant configuration found, using Blue");
+            LedVariant::Blue
+        }
+    }
+}
+
+fn parse_variant(value: &str) -> LedVariant {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "blue" => LedVariant::Blue,
+        "green" => LedVariant::Green,
+        other => {
+            tracing::warn!("Unknown LED variant '{other}', using Blue");
+            LedVariant::Blue
+        }
+    }
+}
+
 // Brightness levels corresponding to the old 8 LEDs
 const LEVELS: [u8; 8] = [80, 105, 130, 155, 180, 205, 230, 255];
 
@@ -63,6 +122,8 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
         .map_err(|e| format!("Failed to initialize RGB LEDs: {e:?}"))?;
 
     let mut animation_position: usize = 0;
+    let variant = load_variant();
+    tracing::info!("Selected LED variant: {:?}", variant);
 
     loop {
         let connected = ethernet_connected();
@@ -106,10 +167,10 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
         } else {
             // ------------------------------------
             // Normal system state
-            // Flux Capacitor idle animation
+            // Flux Capacitor idle animations
             // ------------------------------------
 
-            render_flux_idle(&mut controller, animation_position)?;
+            render_flux_idle(&mut controller, animation_position, variant)?;
 
             if animation_position == BRANCH_LENGTH - 1 {
                 thread::sleep(Duration::from_millis(200));
@@ -126,12 +187,17 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
     }
 }
 
-fn render_flux_idle(controller: &mut rs_ws281x::Controller, position: usize) -> Result<(), String> {
+fn render_flux_idle(
+    controller: &mut rs_ws281x::Controller,
+    position: usize,
+    variant: LedVariant,
+) -> Result<(), String> {
+    let colors = variant.colors();
     let leds = controller.leds_mut(0);
 
     // Soft background glow
     for led in leds.iter_mut() {
-        *led = [5, 15, 30, 0];
+        *led = colors.background;
     }
 
     // Pulse on all three branches
@@ -145,7 +211,7 @@ fn render_flux_idle(controller: &mut rs_ws281x::Controller, position: usize) -> 
             base + position
         };
 
-        leds[current] = [120, 220, 255, 0];
+        leds[current] = colors.pulse;
 
         if position >= 1 {
             let trail_1 = if branch == 2 {
@@ -154,7 +220,7 @@ fn render_flux_idle(controller: &mut rs_ws281x::Controller, position: usize) -> 
                 base + position - 1
             };
 
-            leds[trail_1] = [50, 120, 200, 0];
+            leds[trail_1] = colors.trail_1;
         }
 
         if position >= 2 {
@@ -164,16 +230,16 @@ fn render_flux_idle(controller: &mut rs_ws281x::Controller, position: usize) -> 
                 base + position - 2
             };
 
-            leds[trail_2] = [15, 45, 90, 0];
+            leds[trail_2] = colors.trail_2;
         }
     }
 
     // When the pulse reaches the center,
     // make the three center LEDs flash brighter
     if position == BRANCH_LENGTH - 1 {
-        leds[7] = [180, 255, 255, 0];
-        leds[15] = [180, 255, 255, 0];
-        leds[16] = [180, 255, 255, 0];
+        leds[7] = colors.center;
+        leds[15] = colors.center;
+        leds[16] = colors.center;
     }
 
     controller
@@ -264,4 +330,30 @@ fn ethernet_connected() -> bool {
     }
 
     false
+}
+
+// Unit tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blue_variant() {
+        assert_eq!(parse_variant("blue"), LedVariant::Blue);
+    }
+
+    #[test]
+    fn test_green_variant() {
+        assert_eq!(parse_variant("green"), LedVariant::Green);
+    }
+
+    #[test]
+    fn test_uppercase_variant() {
+        assert_eq!(parse_variant("GREEN"), LedVariant::Green);
+    }
+
+    #[test]
+    fn test_invalid_variant_defaults_to_blue() {
+        assert_eq!(parse_variant("invalid"), LedVariant::Blue);
+    }
 }
