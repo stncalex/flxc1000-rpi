@@ -38,16 +38,6 @@ const VARIANT_ID: [u8; 3] = [0x00, 0x01, 0x01];
 
 const BOOT_STATE_PATH: &str = "/data/boot_state";
 
-/// GPIO pins for the 5-LED bar (active-high, header pins 29-37 odd).
-/// LED1 (dimmest) → LED5 (brightest). GND on pin 39.
-//const LED_PINS: [u8; 5] = [5, 6, 13, 19, 26];
-
-/// PWM duty cycles for each LED (0.0–1.0) — increasing brightness.
-//const LED_DUTY: [f64; 5] = [0.40, 0.55, 0.70, 0.85, 1.00];
-
-/// Software-PWM frequency for LED brightness control (Hz).
-//const LED_PWM_FREQ: f64 = 1000.0;
-
 const RESET_NONE: u8 = 0;
 const RESET_HARD: u8 = 1;
 
@@ -104,31 +94,6 @@ impl SharedState {
         self.diagnostic_activity.store(true, Ordering::Relaxed);
     }
 
-    // /// Set a single LED on or off (full brightness, no PWM).
-    // fn set_led(&self, index: usize, high: bool) {
-    //     let pin_num = LED_PINS[index];
-    //     if let Some(ref gpio) = self.gpio {
-    //         match gpio.get(pin_num) {
-    //             Ok(pin) => {
-    //                 let mut pin = pin.into_output();
-    //                 pin.set_reset_on_drop(false);
-    //                 if high {
-    //                     pin.set_high();
-    //                 } else {
-    //                     pin.set_low();
-    //                 }
-    //             }
-    //             Err(e) => tracing::warn!("GPIO pin {} access failed: {}", pin_num, e),
-    //         }
-    //     } else {
-    //         tracing::debug!(
-    //             "GPIO simulated: LED{} (pin {}) = {}",
-    //             index + 1,
-    //             pin_num,
-    //             if high { "HIGH" } else { "LOW" }
-    //         );
-    //     }
-    // }
     fn set_led(&self, index: usize, high: bool) {
         if index >= 8 {
             return;
@@ -152,106 +117,6 @@ impl SharedState {
         std::thread::sleep(Duration::from_millis(duration_ms));
         self.set_led(index, false);
     }
-
-    // /// Turn all LEDs off.
-    // fn all_leds_off(&self) {
-    //     for i in 0..LED_PINS.len() {
-    //         self.set_led(i, false);
-    //     }
-    // }
-
-    /// Light a single LED at its designated PWM brightness for `duration_ms`,
-    /// then turn it off.
-    // fn pulse_led(&self, index: usize, duration_ms: u64) {
-    //     let pin_num = LED_PINS[index];
-    //     let duty = LED_DUTY[index];
-    //     if let Some(ref gpio) = self.gpio {
-    //         match gpio.get(pin_num) {
-    //             Ok(pin) => {
-    //                 let mut pin = pin.into_output();
-    //                 pin.set_reset_on_drop(false);
-    //                 if let Err(e) = pin.set_pwm_frequency(LED_PWM_FREQ, duty) {
-    //                     tracing::warn!(
-    //                         "PWM on pin {} failed: {} — falling back to digital",
-    //                         pin_num,
-    //                         e
-    //                     );
-    //                     pin.set_high();
-    //                 }
-    //                 std::thread::sleep(Duration::from_millis(duration_ms));
-    //                 let _ = pin.clear_pwm();
-    //                 pin.set_low();
-    //             }
-    //             Err(e) => {
-    //                 tracing::warn!("GPIO pin {} access failed: {}", pin_num, e);
-    //                 std::thread::sleep(Duration::from_millis(duration_ms));
-    //             }
-    //         }
-    //     } else {
-    //         tracing::debug!(
-    //             "GPIO simulated: LED{} (pin {}) PWM duty={:.0}% for {}ms",
-    //             index + 1,
-    //             pin_num,
-    //             duty * 100.0,
-    //             duration_ms,
-    //         );
-    //         std::thread::sleep(Duration::from_millis(duration_ms));
-    //     }
-    // }
-
-    /// Self-test LED cascade: lights LEDs 1→5 one after another, each at its
-    /// designated brightness, holds all on briefly, then turns all off.
-    /// Updates `routine_status` atomically so the handler can poll it.
-    // fn led_cascade_test(&self) {
-    //     self.routine_status.store(ROUTINE_RUNNING, Ordering::SeqCst);
-    //     self.all_leds_off();
-
-    //     // Keep all OutputPin handles alive so their PWM threads persist.
-    //     let mut active_pins: Vec<rppal::gpio::OutputPin> = Vec::with_capacity(LED_PINS.len());
-
-    //     // Light each LED in sequence (previous ones stay on)
-    //     for i in 0..LED_PINS.len() {
-    //         // Check for abort between LEDs
-    //         if self.routine_status.load(Ordering::SeqCst) == ROUTINE_ABORTED {
-    //             tracing::info!("SelfTest aborted during cascade");
-    //             drop(active_pins);
-    //             self.all_leds_off();
-    //             return;
-    //         }
-    //         let pin_num = LED_PINS[i];
-    //         let duty = LED_DUTY[i];
-    //         if let Some(ref gpio) = self.gpio {
-    //             if let Ok(pin) = gpio.get(pin_num) {
-    //                 let mut pin = pin.into_output();
-    //                 if let Err(e) = pin.set_pwm_frequency(LED_PWM_FREQ, duty) {
-    //                     tracing::warn!(
-    //                         "PWM on pin {} failed: {} — falling back to digital",
-    //                         pin_num,
-    //                         e
-    //                     );
-    //                     pin.set_high();
-    //                 }
-    //                 active_pins.push(pin);
-    //             }
-    //         } else {
-    //             tracing::debug!(
-    //                 "GPIO simulated: LED{} (pin {}) ON at {:.0}%",
-    //                 i + 1,
-    //                 pin_num,
-    //                 duty * 100.0
-    //             );
-    //         }
-    //         std::thread::sleep(Duration::from_millis(200));
-    //     }
-    //     // Hold all LEDs on for a moment
-    //     std::thread::sleep(Duration::from_millis(500));
-    //     // Drop all handles — stops PWM threads and resets pins
-    //     drop(active_pins);
-    //     self.all_leds_off();
-    //     self.routine_status
-    //         .store(ROUTINE_COMPLETED, Ordering::SeqCst);
-    //     tracing::info!("SelfTest LED cascade completed");
-    // }
 
     fn led_cascade_test(&self) {
         self.routine_status.store(ROUTINE_RUNNING, Ordering::SeqCst);
