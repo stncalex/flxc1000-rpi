@@ -29,6 +29,14 @@ enum LedVariant {
     Green,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedMode {
+    Waiting,
+    Blue,
+    Green,
+    Idle,
+}
+
 struct IdleColors {
     background: [u8; 4],
     pulse: [u8; 4],
@@ -60,25 +68,43 @@ impl LedVariant {
 }
 
 const VARIANT_CONFIG_PATH: &str = "/data/variant.conf";
+const VARIANT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-fn load_variant() -> LedVariant {
-    match std::fs::read_to_string(VARIANT_CONFIG_PATH) {
-        Ok(value) => parse_variant(&value),
-        Err(_) => {
-            tracing::info!("No variant configuration found, using Blue");
-            LedVariant::Blue
-        }
+// fn load_variant() -> LedVariant {
+//     match std::fs::read_to_string(VARIANT_CONFIG_PATH) {
+//         Ok(value) => parse_variant(&value),
+//         Err(_) => {
+//             tracing::info!("No variant configuration found, using Blue");
+//             LedVariant::Blue
+//         }
+//     }
+// }
+
+// fn parse_variant(value: &str) -> LedVariant {
+//     match value.trim().to_ascii_lowercase().as_str() {
+//         "blue" => LedVariant::Blue,
+//         "green" => LedVariant::Green,
+//         other => {
+//             tracing::warn!("Unknown LED variant '{other}', using Blue");
+//             LedVariant::Blue
+//         }
+//     }
+// }
+
+fn parse_led_mode(value: &str) -> LedMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "blue" => LedMode::Blue,
+        "green" => LedMode::Green,
+        "idle" => LedMode::Idle,
+        "waiting" => LedMode::Waiting,
+        _ => LedMode::Waiting,
     }
 }
 
-fn parse_variant(value: &str) -> LedVariant {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "blue" => LedVariant::Blue,
-        "green" => LedVariant::Green,
-        other => {
-            tracing::warn!("Unknown LED variant '{other}', using Blue");
-            LedVariant::Blue
-        }
+fn load_led_mode() -> LedMode {
+    match std::fs::read_to_string(VARIANT_CONFIG_PATH) {
+        Ok(value) => parse_led_mode(&value),
+        Err(_) => LedMode::Waiting,
     }
 }
 
@@ -122,13 +148,27 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
         .map_err(|e| format!("Failed to initialize RGB LEDs: {e:?}"))?;
 
     let mut animation_position: usize = 0;
-    let variant = load_variant();
-    tracing::info!("Selected LED variant: {:?}", variant);
+
+    let mut mode = load_led_mode();
+    let mut last_variant_check = std::time::Instant::now();
+
+    tracing::info!("Selected LED variant: {:?}", mode);
 
     loop {
-        let connected = ethernet_connected();
+        if last_variant_check.elapsed() >= VARIANT_CHECK_INTERVAL {
+            let new_mode = load_led_mode();
 
-        let diagnostic_active = shared.diagnostic_activity.load(Ordering::Relaxed);
+            if new_mode != mode {
+                tracing::info!("LED variant changed: {:?} -> {:?}", mode, new_mode);
+
+                mode = new_mode;
+                animation_position = 0;
+            }
+
+            last_variant_check = std::time::Instant::now();
+        }
+
+        let connected = ethernet_connected();
 
         if !connected {
             // ------------------------------------
@@ -144,45 +184,63 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
             controller
                 .render()
                 .map_err(|e| format!("Failed to render RGB LEDs: {e:?}"))?;
-        } else if diagnostic_active {
-            // ------------------------------------
-            // Diagnostic communication active
-            // ------------------------------------
-
-            render_flux_communication(&mut controller, animation_position)?;
-
-            animation_position += 1;
-
-            if animation_position >= BRANCH_LENGTH {
-                animation_position = 0;
-
-                // One communication animation finished,
-                // return to idle afterwards
-                shared.diagnostic_activity.store(false, Ordering::Relaxed);
-            }
-
-            thread::sleep(Duration::from_millis(COMMUNICATION_DELAY_MS));
-
-            continue;
         } else {
-            // ------------------------------------
-            // Normal system state
-            // Flux Capacitor idle animations
-            // ------------------------------------
+            match mode {
+                LedMode::Waiting => {
+                    // Ethernet connected, waiting for a command: WHITE
+                    let leds = controller.leds_mut(0);
 
-            render_flux_idle(&mut controller, animation_position, variant)?;
+                    for led in leds.iter_mut() {
+                        *led = [255, 255, 255, 0];
+                    }
 
-            if animation_position == BRANCH_LENGTH - 1 {
-                thread::sleep(Duration::from_millis(200));
-            }
+                    controller
+                        .render()
+                        .map_err(|e| format!("Failed to render white LEDs: {e:?}"))?;
+                }
 
-            animation_position += 1;
+                LedMode::Blue => {
+                    // Solid BLUE
+                    let leds = controller.leds_mut(0);
 
-            if animation_position >= BRANCH_LENGTH {
-                animation_position = 0;
+                    for led in leds.iter_mut() {
+                        *led = [255, 0, 0, 0];
+                    }
+
+                    controller
+                        .render()
+                        .map_err(|e| format!("Failed to render blue LEDs: {e:?}"))?;
+                }
+
+                LedMode::Green => {
+                    //Solid GREEN
+
+                    let leds = controller.leds_mut(0);
+
+                    for led in leds.iter_mut() {
+                        *led = [0, 255, 0, 0];
+                    }
+
+                    controller
+                        .render()
+                        .map_err(|e| format!("Failed to render green LEDs: {e:?}"))?;
+                }
+
+                LedMode::Idle => {
+                    render_flux_idle(&mut controller, animation_position, LedVariant::Blue)?;
+
+                    if animation_position == BRANCH_LENGTH - 1 {
+                        thread::sleep(Duration::from_millis(200));
+                    }
+
+                    animation_position += 1;
+
+                    if animation_position >= BRANCH_LENGTH {
+                        animation_position = 0;
+                    }
+                }
             }
         }
-
         thread::sleep(Duration::from_millis(ANIMATION_DELAY_MS));
     }
 }
@@ -339,21 +397,30 @@ mod tests {
 
     #[test]
     fn test_blue_variant() {
-        assert_eq!(parse_variant("blue"), LedVariant::Blue);
+        assert_eq!(parse_led_mode("blue"), LedMode::Blue);
     }
 
     #[test]
     fn test_green_variant() {
-        assert_eq!(parse_variant("green"), LedVariant::Green);
+        assert_eq!(parse_led_mode("green"), LedMode::Green);
     }
 
     #[test]
     fn test_uppercase_variant() {
-        assert_eq!(parse_variant("GREEN"), LedVariant::Green);
+        assert_eq!(parse_led_mode("GREEN"), LedMode::Green);
     }
 
     #[test]
     fn test_invalid_variant_defaults_to_blue() {
-        assert_eq!(parse_variant("invalid"), LedVariant::Blue);
+        assert_eq!(parse_led_mode("invalid"), LedMode::Waiting);
+    }
+
+    #[test]
+    fn test_led_mode_parsing() {
+        assert_eq!(parse_led_mode("waiting"), LedMode::Waiting);
+        assert_eq!(parse_led_mode("blue"), LedMode::Blue);
+        assert_eq!(parse_led_mode("green"), LedMode::Green);
+        assert_eq!(parse_led_mode("idle"), LedMode::Idle);
+        assert_eq!(parse_led_mode("invalid"), LedMode::Waiting);
     }
 }

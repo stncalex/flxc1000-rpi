@@ -55,6 +55,9 @@ const FLUX_READY: u8 = 0x00;
 const FLUX_READING: u8 = 0x01;
 const FLUX_ERROR: u8 = 0x02;
 
+const LED_VARIANT_DID: u16 = 0xF201;
+const LED_VARIANT_PATH: &str = "/data/variant.conf";
+
 fn request_bootloader() -> std::io::Result<()> {
     let contents = fs::read_to_string(BOOT_STATE_PATH)?;
 
@@ -343,6 +346,30 @@ impl ServerHandler for AppHandler {
                 tracing::info!("VIN updated to: {}", String::from_utf8_lossy(data));
                 Ok(())
             }
+
+            LED_VARIANT_DID => {
+                if data.len() != 1 {
+                    return Err(BuiltinNrc::IncorrectMessageLengthOrInvalidFormat);
+                }
+
+                let variant = match data[0] {
+                    0x00 => "waiting\n",
+                    0x01 => "blue\n",
+                    0x02 => "green\n",
+                    0x03 => "idle\n",
+                    _ => return Err(BuiltinNrc::RequestOutOfRange),
+                };
+
+                fs::write(LED_VARIANT_PATH, variant).map_err(|e| {
+                    tracing::error!("Failed to save LED variant: {e}");
+                    BuiltinNrc::ConditionsNotCorrect
+                })?;
+
+                tracing::info!("LED variant updated through UDS: {}", variant.trim());
+
+                Ok(())
+            }
+
             _ => Err(BuiltinNrc::RequestOutOfRange),
         }
     }
@@ -766,28 +793,40 @@ async fn configure_network() {
     // The interface comes up immediately, carrier-independent.
     let steps: &[&[&str]] = &[
         &["link", "set", &iface, "up"],
-        &["addr", "add", "169.254.16.1/16", "dev", &iface],
+        &["addr", "replace", "169.254.16.1/16", "dev", &iface],
     ];
 
+    let mut network_ok = true;
+
     for args in steps {
-        match tokio::process::Command::new("ip")
+        match tokio::process::Command::new("/sbin/ip")
             .args(*args)
             .output()
             .await
         {
-            Ok(output) if !output.status.success() => {
-                tracing::warn!(
-                    "ip {:?}: {}",
+            Ok(output) if !output.status.success() => {}
+
+            Ok(output) => {
+                network_ok = false;
+                tracing::error!(
+                    "ip {:?} failed: {}",
                     args,
                     String::from_utf8_lossy(&output.stderr).trim()
                 );
             }
-            Err(e) => tracing::error!("ip {:?}: {}", args, e),
-            _ => {}
+
+            Err(e) => {
+                network_ok = false;
+                tracing::error!("Failed to execute ip: {:?}: {}", args, e);
+            }
         }
     }
 
-    tracing::info!("Network configured: 169.254.16.1/16 on {}", iface);
+    if network_ok {
+        tracing::info!("Network configured: 169.254.16.1/16 on {}", iface);
+    } else {
+        tracing::error!("Network configuration failed on {}", iface);
+    }
 }
 
 /// Wait up to 10 s for a non-loopback network interface in /sys/class/net.
