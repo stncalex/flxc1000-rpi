@@ -38,16 +38,6 @@ const VARIANT_ID: [u8; 3] = [0x00, 0x01, 0x01];
 
 const BOOT_STATE_PATH: &str = "/data/boot_state";
 
-/// GPIO pins for the 5-LED bar (active-high, header pins 29-37 odd).
-/// LED1 (dimmest) → LED5 (brightest). GND on pin 39.
-//const LED_PINS: [u8; 5] = [5, 6, 13, 19, 26];
-
-/// PWM duty cycles for each LED (0.0–1.0) — increasing brightness.
-//const LED_DUTY: [f64; 5] = [0.40, 0.55, 0.70, 0.85, 1.00];
-
-/// Software-PWM frequency for LED brightness control (Hz).
-//const LED_PWM_FREQ: f64 = 1000.0;
-
 const RESET_NONE: u8 = 0;
 const RESET_HARD: u8 = 1;
 
@@ -106,6 +96,8 @@ struct SharedState {
     flux_capacitor_power: i32,
     flux_state: AtomicU8,
     last_error: Mutex<Option<String>>,
+
+    diagnostic_screen: Mutex<Option<oled::DiagnosticScreen>>,
 }
 
 impl SharedState {
@@ -120,31 +112,6 @@ impl SharedState {
         self.diagnostic_activity.store(true, Ordering::Relaxed);
     }
 
-    // /// Set a single LED on or off (full brightness, no PWM).
-    // fn set_led(&self, index: usize, high: bool) {
-    //     let pin_num = LED_PINS[index];
-    //     if let Some(ref gpio) = self.gpio {
-    //         match gpio.get(pin_num) {
-    //             Ok(pin) => {
-    //                 let mut pin = pin.into_output();
-    //                 pin.set_reset_on_drop(false);
-    //                 if high {
-    //                     pin.set_high();
-    //                 } else {
-    //                     pin.set_low();
-    //                 }
-    //             }
-    //             Err(e) => tracing::warn!("GPIO pin {} access failed: {}", pin_num, e),
-    //         }
-    //     } else {
-    //         tracing::debug!(
-    //             "GPIO simulated: LED{} (pin {}) = {}",
-    //             index + 1,
-    //             pin_num,
-    //             if high { "HIGH" } else { "LOW" }
-    //         );
-    //     }
-    // }
     fn set_led(&self, index: usize, high: bool) {
         if index >= 8 {
             return;
@@ -168,106 +135,6 @@ impl SharedState {
         std::thread::sleep(Duration::from_millis(duration_ms));
         self.set_led(index, false);
     }
-
-    // /// Turn all LEDs off.
-    // fn all_leds_off(&self) {
-    //     for i in 0..LED_PINS.len() {
-    //         self.set_led(i, false);
-    //     }
-    // }
-
-    /// Light a single LED at its designated PWM brightness for `duration_ms`,
-    /// then turn it off.
-    // fn pulse_led(&self, index: usize, duration_ms: u64) {
-    //     let pin_num = LED_PINS[index];
-    //     let duty = LED_DUTY[index];
-    //     if let Some(ref gpio) = self.gpio {
-    //         match gpio.get(pin_num) {
-    //             Ok(pin) => {
-    //                 let mut pin = pin.into_output();
-    //                 pin.set_reset_on_drop(false);
-    //                 if let Err(e) = pin.set_pwm_frequency(LED_PWM_FREQ, duty) {
-    //                     tracing::warn!(
-    //                         "PWM on pin {} failed: {} — falling back to digital",
-    //                         pin_num,
-    //                         e
-    //                     );
-    //                     pin.set_high();
-    //                 }
-    //                 std::thread::sleep(Duration::from_millis(duration_ms));
-    //                 let _ = pin.clear_pwm();
-    //                 pin.set_low();
-    //             }
-    //             Err(e) => {
-    //                 tracing::warn!("GPIO pin {} access failed: {}", pin_num, e);
-    //                 std::thread::sleep(Duration::from_millis(duration_ms));
-    //             }
-    //         }
-    //     } else {
-    //         tracing::debug!(
-    //             "GPIO simulated: LED{} (pin {}) PWM duty={:.0}% for {}ms",
-    //             index + 1,
-    //             pin_num,
-    //             duty * 100.0,
-    //             duration_ms,
-    //         );
-    //         std::thread::sleep(Duration::from_millis(duration_ms));
-    //     }
-    // }
-
-    /// Self-test LED cascade: lights LEDs 1→5 one after another, each at its
-    /// designated brightness, holds all on briefly, then turns all off.
-    /// Updates `routine_status` atomically so the handler can poll it.
-    // fn led_cascade_test(&self) {
-    //     self.routine_status.store(ROUTINE_RUNNING, Ordering::SeqCst);
-    //     self.all_leds_off();
-
-    //     // Keep all OutputPin handles alive so their PWM threads persist.
-    //     let mut active_pins: Vec<rppal::gpio::OutputPin> = Vec::with_capacity(LED_PINS.len());
-
-    //     // Light each LED in sequence (previous ones stay on)
-    //     for i in 0..LED_PINS.len() {
-    //         // Check for abort between LEDs
-    //         if self.routine_status.load(Ordering::SeqCst) == ROUTINE_ABORTED {
-    //             tracing::info!("SelfTest aborted during cascade");
-    //             drop(active_pins);
-    //             self.all_leds_off();
-    //             return;
-    //         }
-    //         let pin_num = LED_PINS[i];
-    //         let duty = LED_DUTY[i];
-    //         if let Some(ref gpio) = self.gpio {
-    //             if let Ok(pin) = gpio.get(pin_num) {
-    //                 let mut pin = pin.into_output();
-    //                 if let Err(e) = pin.set_pwm_frequency(LED_PWM_FREQ, duty) {
-    //                     tracing::warn!(
-    //                         "PWM on pin {} failed: {} — falling back to digital",
-    //                         pin_num,
-    //                         e
-    //                     );
-    //                     pin.set_high();
-    //                 }
-    //                 active_pins.push(pin);
-    //             }
-    //         } else {
-    //             tracing::debug!(
-    //                 "GPIO simulated: LED{} (pin {}) ON at {:.0}%",
-    //                 i + 1,
-    //                 pin_num,
-    //                 duty * 100.0
-    //             );
-    //         }
-    //         std::thread::sleep(Duration::from_millis(200));
-    //     }
-    //     // Hold all LEDs on for a moment
-    //     std::thread::sleep(Duration::from_millis(500));
-    //     // Drop all handles — stops PWM threads and resets pins
-    //     drop(active_pins);
-    //     self.all_leds_off();
-    //     self.routine_status
-    //         .store(ROUTINE_COMPLETED, Ordering::SeqCst);
-    //     tracing::info!("SelfTest LED cascade completed");
-    // }
 
     fn led_cascade_test(&self) {
         self.routine_status.store(ROUTINE_RUNNING, Ordering::SeqCst);
@@ -308,6 +175,12 @@ impl SharedState {
             std::thread::sleep(Duration::from_millis(150));
         }
     }
+
+    fn show_diagnostic(&self, title: &str, value: &str) {
+        if let Ok(mut screen) = self.diagnostic_screen.lock() {
+            *screen = Some(oled::DiagnosticScreen::new(title, value));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,18 +210,124 @@ impl ServerHandler for AppHandler {
                 Ok(17)
             }
             0xF200 => {
-                // FluxCapacitorPowerConsumption — toggle LED1 while reading
+                // Read flux capacitor power and return it through UDS.
                 self.shared.flux_state.store(FLUX_READING, Ordering::SeqCst);
 
                 self.shared.set_led(0, true);
-                let bytes = self.shared.flux_capacitor_power.to_be_bytes();
+
+                let power = self.shared.flux_capacitor_power;
+                let bytes = power.to_be_bytes();
                 buf[..4].copy_from_slice(&bytes);
+
                 self.shared.set_led(0, false);
 
                 self.shared.flux_state.store(FLUX_READY, Ordering::SeqCst);
 
+                //Show the diagnostic result on the OLED for 10 seconds.
+                self.shared
+                    .show_diagnostic("FLUX POWER", &format!("{} W", power));
+
                 Ok(4)
             }
+
+            0xF202 => {
+                // Read the current application software version.
+                let version = option_env!("FLXC1000_BUILD_VERSION").unwrap_or("unknown");
+
+                let bytes = version.as_bytes();
+
+                if buf.len() < bytes.len() {
+                    return Err(BuiltinNrc::IncorrectMessageLengthOrInvalidFormat);
+                }
+
+                buf[..bytes.len()].copy_from_slice(bytes);
+
+                // Temporarily show the version on the OLED.
+                self.shared.show_diagnostic("SOFTWARE VERSION", version);
+
+                Ok(bytes.len())
+            }
+
+            0xF203 => {
+                // Read the application slot from persistent boot state
+                let slot = read_active_slot("/data/boot_state").map_err(|e| {
+                    tracing::warn!("Cannot read active application slot: {}", e);
+                    BuiltinNrc::ConditionsNotCorrect
+                })?;
+
+                if buf.is_empty() {
+                    return Err(BuiltinNrc::IncorrectMessageLengthOrInvalidFormat);
+                }
+
+                // Encode the slot as one byte: V1 = 0x01, V2 = 0x02
+                buf[0] = slot;
+
+                // Show the active slot temporarly on the display
+                let slot_name = if slot == 1 { "V1" } else { "2" };
+
+                self.shared.show_diagnostic("ACTIVE SLOT", slot_name);
+
+                Ok(1)
+            }
+
+            0xF205 => {
+                // Read the result of the last software update
+                let status = read_last_update_status("/data/boot_state").map_err(|e| {
+                    tracing::warn!("Cannot read last updated status: {}", e);
+                    BuiltinNrc::ConditionsNotCorrect
+                })?;
+
+                // Ensure there is room for the response
+                if buf.is_empty() {
+                    return Err(BuiltinNrc::IncorrectMessageLengthOrInvalidFormat);
+                }
+
+                // Write the status code into the UDS response
+                buf[0] = status;
+
+                // Convert the status code into readable text
+                let status_text = match status {
+                    0 => "UNKNOWN",
+                    1 => "SUCCES",
+                    2 => "ROLLBACK",
+                    _ => "INVALID",
+                };
+
+                //Show the result on the OLED for 10 seconds
+                self.shared.show_diagnostic("LAST UPDATE", status_text);
+
+                Ok(1)
+            }
+
+            0xF206 => {
+                // Read the recorded rollback reason
+                let reason = read_rollback_reason("/data/boot_state").map_err(|e| {
+                    tracing::warn!("Cannot read rollback reason: {}", e);
+                    BuiltinNrc::ConditionsNotCorrect
+                })?;
+
+                // Ensure the response buffer has enough space
+                if buf.is_empty() {
+                    return Err(BuiltinNrc::IncorrectMessageLengthOrInvalidFormat);
+                }
+
+                // Return the rollback reason as one byte
+                buf[0] = reason;
+
+                // Convert the byte into readable text for the OLED
+                let reason_text = match reason {
+                    0 => "NONE",
+                    1 => "MISSING BINARY",
+                    2 => "STARTUP FAILED",
+                    _ => "INVALID",
+                };
+
+                // Display the diagnostic result for 10 seconds
+                self.shared.show_diagnostic("ROLLBACK REASON", reason_text);
+
+                Ok(1)
+            }
+
             _ => Err(BuiltinNrc::RequestOutOfRange),
         }
     }
@@ -443,6 +422,62 @@ impl ServerHandler for AppHandler {
     }
 }
 
+fn read_active_slot(path: &str) -> Result<u8, String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read bootstate: {e}"))?;
+
+    for line in content.lines() {
+        if let Some(value) = line.trim().strip_prefix("active=") {
+            return match value.trim() {
+                "V1" => Ok(1),
+                "V2" => Ok(2),
+                other => Err(format!("Unknown active slot: {other}")),
+            };
+        }
+    }
+
+    Err("Active slot not found in boot state".to_string())
+}
+
+fn read_rollback_reason(path: &str) -> Result<u8, String> {
+    // Read the boot-state file
+    let contents =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read boot state: {e}"))?;
+
+    // Search for the rollbac reason
+    for line in contents.lines() {
+        if let Some(value) = line.trim().strip_prefix("rollback_reason=") {
+            return match value.trim() {
+                "none" => Ok(0),
+                "missing_binary" => Ok(1),
+                "startup_failed" => Ok(2),
+                other => Err(format!("Unknown rollback reason: {other}")),
+            };
+        }
+    }
+
+    Ok(0)
+}
+
+fn read_last_update_status(path: &str) -> Result<u8, String> {
+    let contents =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read boot state: {e}"))?;
+
+    for line in contents.lines() {
+        if let Some(value) = line.trim().strip_prefix("last_update=") {
+            return match value.trim() {
+                "unknown" => Ok(0),
+                "success" => Ok(1),
+                "rollback" => Ok(2),
+                other => Err(format!("Unknown update status: {other}")),
+            };
+        }
+    }
+
+    // Older boot-state files may not contain this field
+    Ok(0)
+}
+
 // ---------------------------------------------------------------------------
 // SecurityProvider — App variant has no security access
 // ---------------------------------------------------------------------------
@@ -522,6 +557,9 @@ fn app_server_config() -> ServerConfig {
         .with_did(DidConfig::read_only(0xF186, &[0x01, 0x03])) // session
         .with_did(DidConfig::read_write(0xF190, &[0x01, 0x03], &[0x03])) // VIN (write in extended)
         .with_did(DidConfig::read_only(0xF200, &[0x01, 0x03])) // FluxCapacitorPowerConsumption
+        .with_did(DidConfig::read_only(0xF202, &[0x01, 0x03]))
+        .with_did(DidConfig::read_only(0xF203, &[0x01, 0x03]))
+        .with_did(DidConfig::read_only(0xF205, &[0x01, 0x03]))
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +669,7 @@ async fn main() {
         flux_capacitor_power: 1210, // 1.21 GW
         flux_state: AtomicU8::new(FLUX_READY),
         last_error: Mutex::new(None),
+        diagnostic_screen: Mutex::new(None),
     });
 
     let handler = AppHandler {
@@ -770,4 +809,175 @@ async fn wait_for_eth_interface() -> String {
     }
     tracing::warn!("No network interface found after 10s, defaulting to eth0");
     "eth0".to_string()
+}
+
+// ============================================================
+// UNIT TESTS - UDS DIAGNOSTIC OLED INTEGRATION
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Create a test application state without starting
+    // the Raspberry Pi hardware or DoIP server.
+    fn test_shared_state() -> Arc<SharedState> {
+        Arc::new(SharedState {
+            pending_reset: AtomicU8::new(RESET_NONE),
+            session_type: AtomicU8::new(0x01),
+            routine_status: AtomicU8::new(ROUTINE_IDLE),
+            vin: Mutex::new(*VIN),
+            dtcs: Mutex::new(Vec::new()),
+            rgb_led_mask: AtomicU8::new(0),
+            diagnostic_activity: AtomicBool::new(false),
+            flux_capacitor_power: 1210,
+            flux_state: AtomicU8::new(FLUX_READY),
+            last_error: Mutex::new(None),
+            diagnostic_screen: Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn read_software_version_updates_oled() {
+        let shared = test_shared_state();
+
+        let handler = AppHandler {
+            shared: Arc::clone(&shared),
+        };
+
+        // Simulate a UDS ReadDataByIdentifier request.
+        let mut buffer = [0u8; 64];
+        let length = handler.read_did(0xF202, &mut buffer).unwrap();
+
+        let expected_version = option_env!("FLXC1000_BUILD_VERSION").unwrap_or("unknown");
+
+        // Verify that the correct version is returned.
+        assert_eq!(&buffer[..length], expected_version.as_bytes());
+
+        // Verify that an OLED notification was created.
+        let screen = shared.diagnostic_screen.lock().unwrap();
+        let screen = screen.as_ref().expect("No diagnostic screen created");
+
+        assert_eq!(screen.title, "SOFTWARE VERSION");
+        assert_eq!(screen.value, expected_version);
+        assert!(screen.is_active());
+    }
+
+    #[test]
+    fn test_read_active_slot_v1() {
+        let path = std::env::temp_dir().join(format!("flxc_slot_v1_{}", std::process::id()));
+
+        std::fs::write(&path, "active=V1\ncandidate=none\n").unwrap();
+
+        let result = read_active_slot(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_read_active_slot_v2() {
+        let path = std::env::temp_dir().join(format!("flxc_slot_v2_{}", std::process::id()));
+
+        std::fs::write(&path, "active=V2\ncandidate=none\n").unwrap();
+
+        let result = read_active_slot(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn test_read_active_slot_invalid() {
+        let path = std::env::temp_dir().join(format!("flxc_slot_invalid_{}", std::process::id()));
+
+        std::fs::write(&path, "active=V3\n").unwrap();
+
+        let result = read_active_slot(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_last_update_success() {
+        let path = std::env::temp_dir().join(format!("flxc_update_success_{}", std::process::id()));
+
+        std::fs::write(&path, "active=V2\nlast_update=success\n").unwrap();
+
+        let result = read_last_update_status(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_read_last_update_rollback() {
+        let path =
+            std::env::temp_dir().join(format!("flxc_update_rollback_{}", std::process::id()));
+
+        std::fs::write(&path, "active=V1\nlast_update=rollback\n").unwrap();
+
+        let result = read_last_update_status(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn test_read_last_update_missing_field() {
+        let path = std::env::temp_dir().join(format!("flxc_update_missing_{}", std::process::id()));
+
+        std::fs::write(&path, "active=V1\ncandidate=none\n").unwrap();
+
+        let result = read_last_update_status(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_read_rollback_reason_missing_binary() {
+        let path = std::env::temp_dir().join(format!("flxc_reason_missing_{}", std::process::id()));
+
+        std::fs::write(&path, "rollback_reason=missing_binary\n").unwrap();
+
+        let result = read_rollback_reason(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_read_rollback_reason_startup_failed() {
+        let path = std::env::temp_dir().join(format!("flxc_reason_startup_{}", std::process::id()));
+
+        std::fs::write(&path, "rollback_reason=startup_failed\n").unwrap();
+
+        let result = read_rollback_reason(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn test_read_rollback_reason_missing_field() {
+        let path = std::env::temp_dir().join(format!("flxc_reason_none_{}", std::process::id()));
+
+        std::fs::write(&path, "active=V1\ncandidate=none\n").unwrap();
+
+        let result = read_rollback_reason(path.to_str().unwrap());
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(result.unwrap(), 0);
+    }
 }

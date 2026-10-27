@@ -1,4 +1,10 @@
-use std::{fmt::Debug, sync::atomic::Ordering, sync::Arc, thread, time::Duration};
+use std::{
+    fmt::Debug,
+    sync::atomic::Ordering,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
@@ -13,6 +19,40 @@ use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 use super::{SharedState, FLUX_ERROR, FLUX_READING, FLUX_READY};
 
 const OLED_ADDRESS: u8 = 0x3C;
+
+// ====================================================================================================================================================================================
+// DIAGNOSTIC DISPLAY LOGIC
+// ====================================================================================================================================================================================
+
+// Duration for which the information stays on the screen
+const DIAGNOSTIC_DISPLAY_DURATION: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone)]
+pub struct DiagnosticScreen {
+    pub title: String,
+    pub value: String,
+    expires_at: Instant,
+}
+
+impl DiagnosticScreen {
+    // Creates a new diagnostic screen with a 10-second timeout
+
+    pub fn new(title: &str, value: &str) -> Self {
+        Self {
+            title: title.to_string(),
+            value: value.to_string(),
+            expires_at: Instant::now() + DIAGNOSTIC_DISPLAY_DURATION,
+        }
+    }
+
+    // Checks whether the diagnostic screen should still be visible.
+    pub fn is_active(&self) -> bool {
+        Instant::now() < self.expires_at
+    }
+}
+// ========================================================================================================================
+// NORMAL OLED FUNCTIONALITY
+// ========================================================================================================================
 
 pub fn spawn_status_task(shared: Arc<SharedState>) {
     thread::spawn(move || {
@@ -71,8 +111,30 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
     tracing::info!("OLED initialized successfully");
 
     loop {
-        draw_status(&mut display, &shared)?;
+        // Check whether a temporary diagnostic screen is active
+        let diagnostic = {
+            let mut screen = shared
+                .diagnostic_screen
+                .lock()
+                .map_err(fmt_err("lock diagnostic screen"))?;
 
+            // Remove the message if its 10-second timeout has expired.
+            if screen.as_ref().is_some_and(|s| !s.is_active()) {
+                *screen = None;
+            }
+
+            // Clone the message so we can release the lock before drawing
+            screen.clone()
+        };
+
+        // Select which screen to display
+        if let Some(screen) = diagnostic {
+            draw_diagnostic(&mut display, &screen)?;
+        } else {
+            draw_status(&mut display, &shared)?;
+        }
+
+        // Send the updated image to the OLED.
         display.flush().map_err(fmt_err("flush oled"))?;
 
         thread::sleep(Duration::from_millis(500));
@@ -123,6 +185,49 @@ where
     Ok(())
 }
 
+fn draw_diagnostic<D>(display: &mut D, screen: &DiagnosticScreen) -> Result<(), String>
+where
+    D: DrawTarget<Color = BinaryColor>,
+    D::Error: Debug,
+{
+    // Clear previous screen contents
+    display
+        .clear(BinaryColor::Off)
+        .map_err(fmt_err("clear diagnostic oled"))?;
+
+    let style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
+
+    // Header
+    Text::with_baseline("DIAGNOSTIC INFO", Point::new(0, 0), style, Baseline::Top)
+        .draw(display)
+        .map_err(fmt_err("draw diagnostic header"))?;
+
+    // Requested diagnostic parameter
+    Text::with_baseline(
+        &short(&screen.title, 21),
+        Point::new(0, 22),
+        style,
+        Baseline::Top,
+    )
+    .draw(display)
+    .map_err(fmt_err("draw diagnostic title"))?;
+
+    // Diagnostic response value
+    Text::with_baseline(
+        &short(&screen.value, 21),
+        Point::new(0, 42),
+        style,
+        Baseline::Top,
+    )
+    .draw(display)
+    .map_err(fmt_err("draw diagnostic value"))?;
+
+    Ok(())
+}
+
 fn flux_name(value: u8) -> &'static str {
     match value {
         FLUX_READY => "READY",
@@ -163,4 +268,46 @@ fn short(value: &str, max: usize) -> String {
 
 fn fmt_err<E: Debug>(context: &'static str) -> impl FnOnce(E) -> String {
     move |e| format!("{context}: {e:?}")
+}
+
+// ============================================================
+// UNIT TESTS
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_diagnostic_screen_is_active() {
+        let screen = DiagnosticScreen::new("SOFTWARE VERSION", "V2");
+
+        assert!(screen.is_active());
+    }
+
+    #[test]
+    fn expired_diagnostic_screen_is_inactive() {
+        let mut screen = DiagnosticScreen::new("SOFTWARE VERSION", "V2");
+
+        // Simulate a screen that expired one sec ago
+        screen.expires_at = Instant::now() - Duration::from_secs(1);
+
+        assert!(!screen.is_active());
+    }
+
+    #[test]
+    fn diagnostic_screen_can_be_replaced() {
+        let mut screen = DiagnosticScreen::new("SOFTWARE VERSION", "V1");
+
+        // Verify the original diagnostic message
+        assert_eq!(screen.title, "SOFTWARE VERSION");
+        assert_eq!(screen.value, "V1");
+
+        // Simulate receiving another diagnostic request
+        screen = DiagnosticScreen::new("ACTIVE SLOT", "V2");
+
+        assert_eq!(screen.title, "ACTIVE SLOT");
+        assert_eq!(screen.value, "V2");
+        assert!(screen.is_active());
+    }
 }
