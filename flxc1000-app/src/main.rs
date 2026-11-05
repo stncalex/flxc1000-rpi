@@ -14,9 +14,10 @@
 use std::ffi::CString;
 use std::fs;
 use std::process;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc::{self, Sender};
 
 use ace_server::config::*;
 use ace_server::handler::ServerHandler;
@@ -33,7 +34,7 @@ mod rgb;
 const ECU_ADDRESS: u16 = 0x1000;
 const VIN: &[u8; 17] = b"FLXC1000TEST00001";
 
-/// App variant identification: DID 0xF100 = 0x000101
+// App variant identification: DID 0xF100 = 0x000101
 const VARIANT_ID: [u8; 3] = [0x00, 0x01, 0x01];
 
 const BOOT_STATE_PATH: &str = "/data/boot_state";
@@ -47,13 +48,9 @@ const ROUTINE_RUNNING: u8 = 0x01;
 const ROUTINE_COMPLETED: u8 = 0x02;
 const ROUTINE_ABORTED: u8 = 0x03;
 
-/// Hardcoded test DTCs
+// Hardcoded test DTCs
 const DTC_CODE1: [u8; 3] = [0x01, 0xE2, 0x40]; // 0x01E240
 const DTC_CODE2: [u8; 3] = [0x03, 0x94, 0x47]; // 0x039447
-
-const FLUX_READY: u8 = 0x00;
-const FLUX_READING: u8 = 0x01;
-const FLUX_ERROR: u8 = 0x02;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -72,34 +69,55 @@ struct SharedState {
     vin: Mutex<[u8; 17]>,
     dtcs: Mutex<Vec<Dtc>>,
 
-    //Bits 0-7 represent the eight old LEDs.
-    rgb_led_mask: AtomicU8,
+    // Bits 0-23 represent the 24 RGB LEDs connected in series on GPIO18.
+    rgb_led_mask: AtomicU32,
+    led_pulse_requests: AtomicU64,
     diagnostic_activity: AtomicBool,
 
-    //gpio: Option<rppal::gpio::Gpio>,
     flux_capacitor_power: i32,
-    flux_state: AtomicU8,
     last_error: Mutex<Option<String>>,
+    oled_tx: Mutex<Option<Sender<oled::OledEvent>>>,
 }
 
 impl SharedState {
     fn set_last_error(&self, msg: impl Into<String>) {
-        let msh: String = msg.into().chars().take(42).collect();
+        const MAX_ERROR_LENGTH: usize = 42;
 
+        let message: String = msg.into().chars().take(MAX_ERROR_LENGTH).collect();
+
+        // Store the error in the application's shared state.
         if let Ok(mut last_error) = self.last_error.lock() {
-            *last_error = Some(msh);
+            *last_error = Some(message.clone());
+        }
+
+        // Notify the OLED without blocking diagnostic handling.
+        if let Ok(sender) = self.oled_tx.lock() {
+            if let Some(sender) = sender.as_ref() {
+                match sender.try_send(oled::OledEvent::LastErrorChanged(message)) {
+                    Ok(()) => {}
+
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // A queued event will trigger a refresh from the latest shared state.
+                    }
+
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::debug!("OLED event channel is closed");
+                    }
+                }
+            }
         }
     }
+
     fn signal_diagnostic_activity(&self) {
         self.diagnostic_activity.store(true, Ordering::Relaxed);
     }
 
     fn set_led(&self, index: usize, high: bool) {
-        if index >= 8 {
+        if index >= 24 {
             return;
         }
 
-        let bit = 1u8 << index;
+        let bit = 1u32 << index;
 
         if high {
             self.rgb_led_mask.fetch_or(bit, Ordering::SeqCst);
@@ -112,19 +130,13 @@ impl SharedState {
         self.rgb_led_mask.store(0, Ordering::SeqCst);
     }
 
-    fn pulse_led(&self, index: usize, duration_ms: u64) {
-        self.set_led(index, true);
-        std::thread::sleep(Duration::from_millis(duration_ms));
-        self.set_led(index, false);
-    }
-
     fn led_cascade_test(&self) {
         self.routine_status.store(ROUTINE_RUNNING, Ordering::SeqCst);
 
         self.all_leds_off();
 
-        //Light logical LEDs 1-> 8 progressively.
-        for i in 0..8 {
+        // Light logical LEDs 1-> 24 progressively.
+        for i in 0..24 {
             if self.routine_status.load(Ordering::SeqCst) == ROUTINE_ABORTED {
                 tracing::info!("SelfTest aborted during cascade");
                 self.all_leds_off();
@@ -135,8 +147,8 @@ impl SharedState {
             std::thread::sleep(Duration::from_millis(200));
         }
 
-        // Hold all LEDs on briefly
-        std::thread::sleep(Duration::from_millis(200));
+        // Hold all LEDs on for 500ms, preserving the original SelfTest behaviour.
+        std::thread::sleep(Duration::from_millis(500));
 
         self.all_leds_off();
 
@@ -144,18 +156,6 @@ impl SharedState {
             .store(ROUTINE_COMPLETED, Ordering::SeqCst);
 
         tracing::info!("RGB SelfTest cascade completed");
-    }
-
-    /// Boot-up blink: flash all 8 LEDs twice to signal the app is ready.
-    fn boot_blink(&self) {
-        for _ in 0..2 {
-            for i in 0..8 {
-                self.set_led(i, true);
-            }
-            std::thread::sleep(Duration::from_millis(150));
-            self.all_leds_off();
-            std::thread::sleep(Duration::from_millis(150));
-        }
     }
 }
 
@@ -186,15 +186,14 @@ impl ServerHandler for AppHandler {
                 Ok(17)
             }
             0xF200 => {
-                // FluxCapacitorPowerConsumption — toggle LED1 while reading
-                self.shared.flux_state.store(FLUX_READING, Ordering::SeqCst);
-
-                self.shared.set_led(0, true);
+                // Read the Flux Capacitor power consumption.
                 let bytes = self.shared.flux_capacitor_power.to_be_bytes();
                 buf[..4].copy_from_slice(&bytes);
-                self.shared.set_led(0, false);
 
-                self.shared.flux_state.store(FLUX_READY, Ordering::SeqCst);
+                // Request a visible LED pulse without delaying the UDS response.
+                self.shared
+                    .led_pulse_requests
+                    .fetch_add(1, Ordering::Relaxed);
 
                 Ok(4)
             }
@@ -248,10 +247,7 @@ impl ServerHandler for AppHandler {
                 if status == ROUTINE_RUNNING {
                     return Err(BuiltinNrc::RequestSequenceError);
                 }
-                tracing::info!(
-                    "RoutineControl SelfTest Start — RGB #2 cascade",
-                    //LED_PINS
-                );
+                tracing::info!("RoutineControl SelfTest Start - 24-LED cascade on GPIO18");
                 let shared = Arc::clone(&self.shared);
                 std::thread::spawn(move || {
                     shared.led_cascade_test();
@@ -468,11 +464,12 @@ async fn main() {
                 status: 0x24,
             },
         ]),
-        //gpio,
-        rgb_led_mask: AtomicU8::new(0),
+
+        rgb_led_mask: AtomicU32::new(0),
+        led_pulse_requests: AtomicU64::new(0),
         flux_capacitor_power: 1210, // 1.21 GW
-        flux_state: AtomicU8::new(FLUX_READY),
         last_error: Mutex::new(None),
+        oled_tx: Mutex::new(None),
     });
 
     let handler = AppHandler {
@@ -486,13 +483,17 @@ async fn main() {
         NodeAddress(ECU_ADDRESS as u32),
     );
 
-    oled::spawn_status_task(Arc::clone(&shared));
+    // Create a bounded channel for OLED state changes.
+    let (oled_tx, oled_rx) = mpsc::channel::<oled::OledEvent>(16);
 
-    //RGB sticks shows Ethernet connection status
+    // Make the sender available to application handlers.
+    *shared.oled_tx.lock().unwrap() = Some(oled_tx);
+
+    // Start the OLED thread with its event receiver.
+    oled::spawn_status_task(Arc::clone(&shared), oled_rx);
+
+    // RGB sticks show Ethernet connection status
     rgb::spawn_status_task(Arc::clone(&shared));
-
-    // Signal boot-up by blinking all LEDs twice
-    shared.boot_blink();
 
     let boot_time = std::time::Instant::now();
     tracing::info!("App ECU ready, waiting for diagnostic requests");
@@ -505,7 +506,7 @@ async fn main() {
             "UDS request"
         );
 
-        //Trigger communication light show
+        // Trigger communication light show
         shared.signal_diagnostic_activity();
 
         let now = ace_now(&boot_time);
@@ -593,7 +594,7 @@ async fn configure_network() {
     tracing::info!("Network configured: 169.254.16.1/16 on {}", iface);
 }
 
-/// Wait up to 10 s for a non-loopback network interface in /sys/class/net.
+// Wait up to 10 s for a non-loopback network interface in /sys/class/net.
 async fn wait_for_eth_interface() -> String {
     for attempt in 0..20 {
         if let Ok(entries) = std::fs::read_dir("/sys/class/net") {

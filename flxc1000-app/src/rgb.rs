@@ -16,14 +16,16 @@ use std::{
 use super::SharedState;
 
 const COMMUNICATION_DELAY_MS: u64 = 45;
-const ETHERNET_LED_COUNT: i32 = 24;
+const MAIN_LED_COUNT: i32 = 24;
 const SELF_TEST_LED_COUNT: i32 = 8;
 
 const BRANCH_COUNT: usize = 3;
 const BRANCH_LENGTH: usize = 8;
 const ANIMATION_DELAY_MS: u64 = 90;
+const RGB_REFRESH_MS: u64 = 10;
+const LED_PULSE_DURATION_MS: u64 = 150;
 
-// Brightness levels corresponding to the old 8 LEDs
+// Brightness levels repeated across the three 8-LED sticks.
 const LEVELS: [u8; 8] = [80, 105, 130, 155, 180, 205, 230, 255];
 
 pub fn spawn_status_task(shared: Arc<SharedState>) {
@@ -43,13 +45,13 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
             0,
             ChannelBuilder::new()
                 .pin(18)
-                .count(ETHERNET_LED_COUNT)
+                .count(MAIN_LED_COUNT)
                 .strip_type(StripType::Ws2812)
                 .brightness(32)
                 .build(),
         )
-        // RGB #2 - old 8 LED bar / self-test
-        // GPIO13 = physical pin 33
+        // RGB #2 - reserved for a future hardware expansion.
+        // GPIO13 = physical pin 33 (currently no LEDs connected)
         .channel(
             1,
             ChannelBuilder::new()
@@ -62,67 +64,137 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Failed to initialize RGB LEDs: {e:?}"))?;
 
+    render_boot_blink(&mut controller)?;
+
     let mut animation_position: usize = 0;
+    let mut next_animation_update = std::time::Instant::now();
+    let mut last_mask: Option<u32> = None;
+    let mut last_connected: Option<bool> = None;
+    let mut last_diagnostic_active: Option<bool> = None;
+    let mut last_self_test_active: Option<bool> = None;
+
+    // Track requests to flash LED 1
+    let mut last_pulse_request = shared.led_pulse_requests.load(Ordering::Relaxed);
+    let mut pulse_until: Option<std::time::Instant> = None;
 
     loop {
         let connected = ethernet_connected();
 
-        let diagnostic_active = shared.diagnostic_activity.load(Ordering::Relaxed);
+        // Notify the OLED only when Ethernet connectivity changes.
+        if last_connected != Some(connected) {
+            let sender = shared.oled_tx.lock().ok().and_then(|guard| guard.clone());
 
-        if !connected {
-            // ------------------------------------
-            // Ethernet disconnected
-            // ------------------------------------
+            if let Some(sender) = sender {
+                match sender.try_send(crate::oled::OledEvent::EthernetChanged(connected)) {
+                    Ok(()) => {}
 
-            let leds = controller.leds_mut(0);
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        // A queued event will trigger a refresh from the latest state.
+                    }
 
-            for led in leds.iter_mut() {
-                *led = [0, 0, 255, 0];
-            }
-
-            controller
-                .render()
-                .map_err(|e| format!("Failed to render RGB LEDs: {e:?}"))?;
-        } else if diagnostic_active {
-            // ------------------------------------
-            // Diagnostic communication active
-            // ------------------------------------
-
-            render_flux_communication(&mut controller, animation_position)?;
-
-            animation_position += 1;
-
-            if animation_position >= BRANCH_LENGTH {
-                animation_position = 0;
-
-                // One communication animation finished,
-                // return to idle afterwards
-                shared.diagnostic_activity.store(false, Ordering::Relaxed);
-            }
-
-            thread::sleep(Duration::from_millis(COMMUNICATION_DELAY_MS));
-
-            continue;
-        } else {
-            // ------------------------------------
-            // Normal system state
-            // Flux Capacitor idle animation
-            // ------------------------------------
-
-            render_flux_idle(&mut controller, animation_position)?;
-
-            if animation_position == BRANCH_LENGTH - 1 {
-                thread::sleep(Duration::from_millis(200));
-            }
-
-            animation_position += 1;
-
-            if animation_position >= BRANCH_LENGTH {
-                animation_position = 0;
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::debug!("OLED event channel is closed");
+                    }
+                }
             }
         }
 
-        thread::sleep(Duration::from_millis(ANIMATION_DELAY_MS));
+        let diagnostic_active = shared.diagnostic_activity.load(Ordering::Relaxed);
+        let mut mask = shared.rgb_led_mask.load(Ordering::SeqCst);
+        let now = std::time::Instant::now();
+        let self_test_active =
+            shared.routine_status.load(Ordering::SeqCst) == super::ROUTINE_RUNNING;
+
+        // Check whether a new LED pulse was requested.
+        let pulse_request = shared.led_pulse_requests.load(Ordering::Relaxed);
+
+        if pulse_request != last_pulse_request {
+            last_pulse_request = pulse_request;
+            pulse_until = Some(now + Duration::from_millis(LED_PULSE_DURATION_MS));
+        }
+
+        // Keep LED 1 illuminated while the pulse is active.
+        if let Some(deadline) = pulse_until {
+            if now < deadline {
+                mask |= 1u32
+            } else {
+                pulse_until = None;
+            }
+        }
+
+        // Update the eight-LED bar when its mask changes.
+        let mask_changed = last_mask != Some(mask);
+
+        if mask_changed {
+            render_self_test_bar(&mut controller, mask);
+            last_mask = Some(mask);
+        }
+
+        // Update the main animation only when needed.
+        let state_changed = last_connected != Some(connected)
+            || last_diagnostic_active != Some(diagnostic_active)
+            || last_self_test_active != Some(self_test_active);
+
+        let animation_due = now >= next_animation_update;
+
+        let mut frame_updated = false;
+
+        if state_changed || mask_changed || (!self_test_active && animation_due) {
+            if self_test_active {
+                // SelfTest takes priority over normal animations.
+                render_self_test_main(&mut controller, mask);
+            } else if !connected {
+                // Ethernet disconnected: solid red.
+                for led in controller.leds_mut(0).iter_mut() {
+                    *led = [0, 0, 255, 0];
+                }
+
+                next_animation_update = now + Duration::from_millis(ANIMATION_DELAY_MS);
+            } else if diagnostic_active {
+                render_flux_communication(&mut controller, animation_position)?;
+
+                animation_position += 1;
+
+                if animation_position >= BRANCH_LENGTH {
+                    animation_position = 0;
+                    shared.diagnostic_activity.store(false, Ordering::Relaxed);
+                }
+
+                next_animation_update = now + Duration::from_millis(COMMUNICATION_DELAY_MS);
+            } else {
+                render_flux_idle(&mut controller, animation_position)?;
+
+                let delay = if animation_position == BRANCH_LENGTH - 1 {
+                    ANIMATION_DELAY_MS + 200
+                } else {
+                    ANIMATION_DELAY_MS
+                };
+
+                animation_position = (animation_position + 1) % BRANCH_LENGTH;
+
+                next_animation_update = now + Duration::from_millis(delay);
+            }
+
+            // Show the diagnostic LED pulse on the physical RGB channel.
+            // SelfTest and Ethernet-disconnected status retain priority.
+            if connected && !self_test_active && pulse_until.is_some() {
+                controller.leds_mut(0)[0] = [0, 255, 0, 0];
+            }
+
+            last_connected = Some(connected);
+            last_diagnostic_active = Some(diagnostic_active);
+            last_self_test_active = Some(self_test_active);
+            frame_updated = true;
+        }
+
+        // Send both channels to the physical LEDs.
+        if mask_changed || frame_updated {
+            controller
+                .render()
+                .map_err(|e| format!("Failed to render RGB LEDs: {e:?}"))?;
+        }
+
+        thread::sleep(Duration::from_millis(RGB_REFRESH_MS));
     }
 }
 
@@ -176,9 +248,7 @@ fn render_flux_idle(controller: &mut rs_ws281x::Controller, position: usize) -> 
         leds[16] = [180, 255, 255, 0];
     }
 
-    controller
-        .render()
-        .map_err(|e| format!("Failed to render Flux Idle animation: {e:?}"))
+    Ok(())
 }
 
 fn render_flux_communication(
@@ -235,12 +305,10 @@ fn render_flux_communication(
         leds[16] = [255, 255, 255, 0];
     }
 
-    controller
-        .render()
-        .map_err(|e| format!("Failed to render communication animation: {e:?}"))
+    Ok(())
 }
 
-fn ethernet_connected() -> bool {
+pub(crate) fn ethernet_connected() -> bool {
     let interfaces = match std::fs::read_dir("/sys/class/net") {
         Ok(entries) => entries,
         Err(_) => return false,
@@ -264,4 +332,54 @@ fn ethernet_connected() -> bool {
     }
 
     false
+}
+
+// For future implementation that will happen soon.
+fn render_self_test_bar(controller: &mut rs_ws281x::Controller, mask: u32) {
+    let leds = controller.leds_mut(1);
+
+    for (i, led) in leds.iter_mut().enumerate() {
+        let enabled = (mask & (1u32 << i)) != 0;
+
+        *led = if enabled {
+            [0, LEVELS[i], 0, 0]
+        } else {
+            [0; 4]
+        };
+    }
+}
+
+fn render_boot_blink(controller: &mut rs_ws281x::Controller) -> Result<(), String> {
+    for _ in 0..2 {
+        render_self_test_main(controller, 0x00FF_FFFF);
+
+        controller
+            .render()
+            .map_err(|e| format!("Failed to render boot blink: {e:?}"))?;
+
+        thread::sleep(Duration::from_millis(150));
+
+        render_self_test_main(controller, 0);
+
+        controller
+            .render()
+            .map_err(|e| format!("Failed to render boot blink: {e:?}"))?;
+
+        thread::sleep(Duration::from_millis(150));
+    }
+    Ok(())
+}
+
+fn render_self_test_main(controller: &mut rs_ws281x::Controller, mask: u32) {
+    let leds = controller.leds_mut(0);
+
+    for (i, led) in leds.iter_mut().enumerate() {
+        let enabled = (mask & (1u32 << i)) != 0;
+
+        *led = if enabled {
+            [0, LEVELS[i % 8], 0, 0]
+        } else {
+            [0; 4]
+        };
+    }
 }
