@@ -70,27 +70,6 @@ impl LedVariant {
 const VARIANT_CONFIG_PATH: &str = "/data/variant.conf";
 const VARIANT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-// fn load_variant() -> LedVariant {
-//     match std::fs::read_to_string(VARIANT_CONFIG_PATH) {
-//         Ok(value) => parse_variant(&value),
-//         Err(_) => {
-//             tracing::info!("No variant configuration found, using Blue");
-//             LedVariant::Blue
-//         }
-//     }
-// }
-
-// fn parse_variant(value: &str) -> LedVariant {
-//     match value.trim().to_ascii_lowercase().as_str() {
-//         "blue" => LedVariant::Blue,
-//         "green" => LedVariant::Green,
-//         other => {
-//             tracing::warn!("Unknown LED variant '{other}', using Blue");
-//             LedVariant::Blue
-//         }
-//     }
-// }
-
 fn parse_led_mode(value: &str) -> LedMode {
     match value.trim().to_ascii_lowercase().as_str() {
         "blue" => LedMode::Blue,
@@ -151,6 +130,7 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
 
     let mut mode = load_led_mode();
     let mut last_variant_check = std::time::Instant::now();
+    let mut last_ethernet_state: Option<bool> = None;
 
     tracing::info!("Selected LED variant: {:?}", mode);
 
@@ -169,6 +149,24 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
         }
 
         let connected = ethernet_connected();
+
+        // Notify the OLED only when Ethernet connectivity changes.
+        if last_ethernet_state != Some(connected) {
+            if let Ok(sender) = shared.oled_tx.lock() {
+                if let Some(sender) = sender.as_ref() {
+                    match sender.try_send(crate::oled::OledEvent::EthernetChanged(connected)) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            // An already queued event can trigger a refresh.
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            tracing::debug!("OLED event channel is closed");
+                        }
+                    }
+                }
+            }
+            last_ethernet_state = Some(connected);
+        }
 
         if !connected {
             // ------------------------------------

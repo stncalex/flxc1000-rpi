@@ -14,9 +14,10 @@
 use std::ffi::CString;
 use std::fs;
 use std::process;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc::{self, Sender};
 
 use ace_server::config::*;
 use ace_server::handler::ServerHandler;
@@ -99,16 +100,34 @@ struct SharedState {
     flux_capacitor_power: i32,
     flux_state: AtomicU8,
     last_error: Mutex<Option<String>>,
-
     diagnostic_screen: Mutex<Option<oled::DiagnosticScreen>>,
+    oled_tx: Mutex<Option<Sender<oled::OledEvent>>>,
 }
 
 impl SharedState {
     fn set_last_error(&self, msg: impl Into<String>) {
-        let msh: String = msg.into().chars().take(42).collect();
+        const MAX_ERROR_LENGTH: usize = 42;
 
+        let message: String = msg.into().chars().take(MAX_ERROR_LENGTH).collect();
+
+        // Store the latest application error.
         if let Ok(mut last_error) = self.last_error.lock() {
-            *last_error = Some(msh);
+            *last_error = Some(message.clone());
+        }
+
+        // Notify the OLED without blocking diagnostic handling.
+        if let Ok(sender) = self.oled_tx.lock() {
+            if let Some(sender) = sender.as_ref() {
+                match sender.try_send(oled::OledEvent::LastErrorChanged(message)) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // The OLED can resynchronize from shared state.
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::debug!("OLED event channel is closed");
+                    }
+                }
+            }
         }
     }
     fn signal_diagnostic_activity(&self) {
@@ -180,8 +199,24 @@ impl SharedState {
     }
 
     fn show_diagnostic(&self, title: &str, value: &str) {
+        // Store the diagnostic information for the OLED.
         if let Ok(mut screen) = self.diagnostic_screen.lock() {
             *screen = Some(oled::DiagnosticScreen::new(title, value));
+        }
+
+        // Notify the OLED thread without blocking diagnostic communication.
+        if let Ok(sender) = self.oled_tx.lock() {
+            if let Some(sender) = sender.as_ref() {
+                match sender.try_send(oled::OledEvent::DiagnosticChanged) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // A queued event will trigger a refresh from shared state.
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::debug!("OLED event channel is closed");
+                    }
+                }
+            }
         }
     }
 }
@@ -724,6 +759,7 @@ async fn main() {
         flux_state: AtomicU8::new(FLUX_READY),
         last_error: Mutex::new(None),
         diagnostic_screen: Mutex::new(None),
+        oled_tx: Mutex::new(None),
     });
 
     let handler = AppHandler {
@@ -737,7 +773,15 @@ async fn main() {
         NodeAddress(ECU_ADDRESS as u32),
     );
 
-    oled::spawn_status_task(Arc::clone(&shared));
+    // Create a bounded channel for OLED updates.
+    let (oled_tx, oled_rx) = mpsc::channel::<oled::OledEvent>(16);
+
+    // Make the sender accessible to application handlers.
+    *shared.oled_tx.lock().unwrap() = Some(oled_tx);
+
+    // Start the OLED thread.
+    // We will pass oled_rx to it when updating oled.rs.
+    oled::spawn_status_task(Arc::clone(&shared), oled_rx);
 
     //RGB sticks shows Ethernet connection status
     rgb::spawn_status_task(Arc::clone(&shared));
@@ -900,6 +944,7 @@ mod tests {
             flux_state: AtomicU8::new(FLUX_READY),
             last_error: Mutex::new(None),
             diagnostic_screen: Mutex::new(None),
+            oled_tx: Mutex::new(None),
         })
     }
 
