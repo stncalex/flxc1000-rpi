@@ -233,6 +233,27 @@ impl ServerHandler for AppHandler {
                 Ok(4)
             }
 
+            LED_VARIANT_DID => {
+                let variant = fs::read_to_string(LED_VARIANT_PATH).map_err(|e| {
+                    tracing::warn!("Cannot read LED variant: {e}");
+                    BuiltinNrc::ConditionsNotCorrect
+                })?;
+
+                if buf.is_empty() {
+                    return Err(BuiltinNrc::IncorrectMessageLengthOrInvalidFormat);
+                }
+
+                buf[0] = match variant.trim() {
+                    "waiting" | "white" => 0x00,
+                    "blue" => 0x01,
+                    "green" => 0x02,
+                    "idle" => 0x03,
+                    _ => return Err(BuiltinNrc::RequestOutOfRange),
+                };
+
+                Ok(1)
+            }
+
             0xF202 => {
                 // Read the current application software version.
                 let version = option_env!("FLXC1000_BUILD_VERSION").unwrap_or("unknown");
@@ -584,9 +605,15 @@ fn app_server_config() -> ServerConfig {
         .with_did(DidConfig::read_only(0xF186, &[0x01, 0x03])) // session
         .with_did(DidConfig::read_write(0xF190, &[0x01, 0x03], &[0x03])) // VIN (write in extended)
         .with_did(DidConfig::read_only(0xF200, &[0x01, 0x03])) // FluxCapacitorPowerConsumption
+        .with_did(DidConfig::read_write(
+            LED_VARIANT_DID,
+            &[0x01, 0x03],
+            &[0x03],
+        ))
         .with_did(DidConfig::read_only(0xF202, &[0x01, 0x03]))
         .with_did(DidConfig::read_only(0xF203, &[0x01, 0x03]))
         .with_did(DidConfig::read_only(0xF205, &[0x01, 0x03]))
+        .with_did(DidConfig::read_only(0xF206, &[0x01, 0x03]))
 }
 
 // ---------------------------------------------------------------------------
