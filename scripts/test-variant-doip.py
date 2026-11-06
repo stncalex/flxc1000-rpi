@@ -97,7 +97,7 @@ with socket.create_connection((PI_IP, DOIP_PORT), timeout=5) as sock:
     uds_request(sock, [0x10, 0x03])
 
     # Read initial variant
-    uds_request(sock, [0x22, 0xF2, 0x01])
+    # uds_request(sock, [0x22, 0xF2, 0x01])
 
     # Select the LED mode specified by the user
     print(f"Selecting LED mode: {args.mode}")

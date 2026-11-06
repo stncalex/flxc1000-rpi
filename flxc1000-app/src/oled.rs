@@ -173,7 +173,13 @@ fn run(
         // Any event causes us to refresh from the latest shared state.
         // The channel may close when the application shuts down.
         match event {
-            Some(_) => continue,
+            Some(_) => {
+                // Consume additional pending notifications
+                // The next loop iteration reads the latest shared state
+                while receiver.try_recv().is_ok() {}
+
+                continue;
+            }
             None => break,
         }
     }
