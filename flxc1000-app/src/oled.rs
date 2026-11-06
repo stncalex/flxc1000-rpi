@@ -13,12 +13,19 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 
+use super::{SharedState, FLUX_ERROR, FLUX_READING, FLUX_READY};
 use rppal::i2c::I2c;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
-
-use super::{SharedState, FLUX_ERROR, FLUX_READING, FLUX_READY};
+use tokio::sync::mpsc::Receiver;
 
 const OLED_ADDRESS: u8 = 0x3C;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OledEvent {
+    LastErrorChanged(String),
+    EthernetChanged(bool),
+    DiagnosticChanged,
+}
 
 // ====================================================================================================================================================================================
 // DIAGNOSTIC DISPLAY LOGIC
@@ -54,15 +61,30 @@ impl DiagnosticScreen {
 // NORMAL OLED FUNCTIONALITY
 // ========================================================================================================================
 
-pub fn spawn_status_task(shared: Arc<SharedState>) {
+pub fn spawn_status_task(shared: Arc<SharedState>, mut receiver: Receiver<OledEvent>) {
     thread::spawn(move || {
-        if let Err(e) = run(shared) {
-            tracing::warn!("OLED disabled: {}", e);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("Failed to create OLED event runtime");
+
+        loop {
+            match run(Arc::clone(&shared), &mut receiver, &runtime) {
+                Ok(()) => break,
+                Err(e) => {
+                    tracing::warn!("OLED error: {}. Retrying initialization...", e);
+                    thread::sleep(Duration::from_secs(2));
+                }
+            }
         }
     });
 }
 
-fn run(shared: Arc<SharedState>) -> Result<(), String> {
+fn run(
+    shared: Arc<SharedState>,
+    receiver: &mut Receiver<OledEvent>,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<(), String> {
     match std::fs::read("/proc/device-tree/soc/i2c@7e804000/status") {
         Ok(bytes) => {
             let status = String::from_utf8_lossy(&bytes);
@@ -111,34 +133,58 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
     tracing::info!("OLED initialized successfully");
 
     loop {
-        // Check whether a temporary diagnostic screen is active
+        // Read the current diagnostic screen and remove it if expired.
         let diagnostic = {
             let mut screen = shared
                 .diagnostic_screen
                 .lock()
                 .map_err(fmt_err("lock diagnostic screen"))?;
 
-            // Remove the message if its 10-second timeout has expired.
             if screen.as_ref().is_some_and(|s| !s.is_active()) {
                 *screen = None;
             }
 
-            // Clone the message so we can release the lock before drawing
             screen.clone()
         };
 
-        // Select which screen to display
-        if let Some(screen) = diagnostic {
-            draw_diagnostic(&mut display, &screen)?;
+        // Display diagnostic information when available.
+        // Otherwise, display the normal status screen.
+        if let Some(ref screen) = diagnostic {
+            draw_diagnostic(&mut display, screen)?;
         } else {
             draw_status(&mut display, &shared)?;
         }
 
-        // Send the updated image to the OLED.
         display.flush().map_err(fmt_err("flush oled"))?;
 
-        thread::sleep(Duration::from_millis(500));
+        // Wait for an event, or for the diagnostic screen to expire.
+        let event = if let Some(ref screen) = diagnostic {
+            let remaining = screen.expires_at.saturating_duration_since(Instant::now());
+
+            match runtime.block_on(tokio::time::timeout(remaining, receiver.recv())) {
+                Ok(event) => event,
+                Err(_) => continue, // Timeout: redraw normal screen.
+            }
+        } else {
+            // No diagnostic screen: wait until an event arrives.
+            runtime.block_on(receiver.recv())
+        };
+
+        // Any event causes us to refresh from the latest shared state.
+        // The channel may close when the application shuts down.
+        match event {
+            Some(_) => {
+                // Consume additional pending notifications
+                // The next loop iteration reads the latest shared state
+                while receiver.try_recv().is_ok() {}
+
+                continue;
+            }
+            None => break,
+        }
     }
+
+    Ok(())
 }
 
 fn draw_status<D>(display: &mut D, shared: &SharedState) -> Result<(), String>
