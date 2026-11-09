@@ -269,8 +269,21 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
                     }
 
                     LedMode::Blue => {
-                        for led in controller.leds_mut(0).iter_mut() {
-                            *led = [255, 0, 0, 0];
+                        // for led in controller.leds_mut(0).iter_mut() {
+                        //     *led = [255, 0, 0, 0];
+                        // }
+
+                        // next_animation_update = now + Duration::from_millis(ANIMATION_DELAY_MS);
+
+                        let leds = controller.leds_mut(0);
+
+                        for (index, led) in leds.iter_mut().enumerate() {
+                            *led = match index {
+                                0..=7 => [0, 0, 255, 0],   // Red
+                                8..=15 => [0, 255, 0, 0],  // Green
+                                16..=23 => [255, 0, 0, 0], // Blue
+                                _ => [0, 0, 0, 0],
+                            };
                         }
 
                         next_animation_update = now + Duration::from_millis(ANIMATION_DELAY_MS);
@@ -341,8 +354,11 @@ fn render_flux_idle(
     for branch in 0..BRANCH_COUNT {
         let base = branch * BRANCH_LENGTH;
 
-        // Stick 3 is physically reversed
-        let current = if branch == 2 {
+        // Reverse the red stick (branch 0).
+        // Preserve the existing reversal of branch 2.
+        let reversed = branch == 0 || branch == 2;
+
+        let current = if reversed {
             base + (BRANCH_LENGTH - 1 - position)
         } else {
             base + position
@@ -351,7 +367,7 @@ fn render_flux_idle(
         leds[current] = colors.pulse;
 
         if position >= 1 {
-            let trail_1 = if branch == 2 {
+            let trail_1 = if reversed {
                 base + (BRANCH_LENGTH - position)
             } else {
                 base + position - 1
@@ -361,7 +377,7 @@ fn render_flux_idle(
         }
 
         if position >= 2 {
-            let trail_2 = if branch == 2 {
+            let trail_2 = if reversed {
                 base + (BRANCH_LENGTH + 1 - position)
             } else {
                 base + position - 2
@@ -374,9 +390,9 @@ fn render_flux_idle(
     // When the pulse reaches the center,
     // make the three center LEDs flash brighter
     if position == BRANCH_LENGTH - 1 {
-        leds[7] = colors.center;
-        leds[15] = colors.center;
-        leds[16] = colors.center;
+        leds[0] = colors.center; // Red stick
+        leds[15] = colors.center; // Green stick
+        leds[16] = colors.center; // Blue stick
     }
 
     Ok(())
