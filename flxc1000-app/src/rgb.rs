@@ -131,6 +131,7 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
     render_boot_blink(&mut controller)?;
 
     let mut animation_position: usize = 0;
+    let mut animation_forward = true;
     let mut next_animation_update = std::time::Instant::now();
     let mut last_mask: Option<u32> = None;
     let mut last_connected: Option<bool> = None;
@@ -152,10 +153,10 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
 
             if new_mode != mode {
                 tracing::info!("LED variant changed: {:?} -> {:?}", mode, new_mode);
-
                 mode = new_mode;
                 animation_position = 0;
                 variant_changed = true;
+                animation_forward = true;
             }
 
             last_variant_check = std::time::Instant::now();
@@ -182,7 +183,14 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
             }
         }
 
-        let diagnostic_active = shared.diagnostic_activity.load(Ordering::Relaxed);
+        let mut diagnostic_active = shared.diagnostic_activity.load(Ordering::Relaxed);
+
+        // Only show diagnostic animations when no explicit mode is selected.
+        if diagnostic_active && mode != LedMode::Waiting {
+            shared.diagnostic_activity.store(false, Ordering::Relaxed);
+            diagnostic_active = false;
+        }
+
         let mut mask = shared.rgb_led_mask.load(Ordering::SeqCst);
         let now = std::time::Instant::now();
         let self_test_active =
@@ -264,7 +272,20 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
                             ANIMATION_DELAY_MS
                         };
 
-                        animation_position = (animation_position + 1) % BRANCH_LENGTH;
+                        if animation_forward {
+                            if animation_position == BRANCH_LENGTH - 1 {
+                                animation_forward = false;
+                                animation_position -= 1;
+                            } else {
+                                animation_position += 1;
+                            }
+                        } else if animation_position == 0 {
+                            animation_forward = true;
+                            animation_position += 1;
+                        } else {
+                            animation_position -= 1;
+                        }
+
                         next_animation_update = now + Duration::from_millis(delay);
                     }
 
@@ -306,7 +327,19 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
                             ANIMATION_DELAY_MS
                         };
 
-                        animation_position = (animation_position + 1) % BRANCH_LENGTH;
+                        if animation_forward {
+                            if animation_position == BRANCH_LENGTH - 1 {
+                                animation_forward = false;
+                                animation_position -= 1;
+                            } else {
+                                animation_position += 1;
+                            }
+                        } else if animation_position == 0 {
+                            animation_forward = true;
+                            animation_position += 1;
+                        } else {
+                            animation_position -= 1;
+                        }
 
                         next_animation_update = now + Duration::from_millis(delay);
                     }
@@ -521,7 +554,14 @@ fn render_self_test_main(controller: &mut rs_ws281x::Controller, mask: u32) {
     let leds = controller.leds_mut(0);
 
     for (i, led) in leds.iter_mut().enumerate() {
-        let enabled = (mask & (1u32 << i)) != 0;
+        // Reverse only the green stick (LEDs 8-15).
+        let mask_index = if (8..16).contains(&i) {
+            8 + (15 - i)
+        } else {
+            i
+        };
+
+        let enabled = (mask & (1u32 << mask_index)) != 0;
 
         *led = if enabled {
             [0, LEVELS[i % 8], 0, 0]
