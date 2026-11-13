@@ -8,9 +8,6 @@ use std::{
 
 use super::SharedState;
 
-const LED_COUNT: i32 = 24;
-const UPDATE_DELAY_MS: u64 = 60;
-
 pub fn spawn_update_task(shared: Arc<SharedState>) {
     thread::spawn(move || {
         if let Err(e) = run(shared) {

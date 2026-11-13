@@ -14,7 +14,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::process;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Sender};
@@ -76,7 +76,6 @@ struct SharedState {
     // Bits 0-23 represent the 24 RGB LEDs connected in series on GPIO18.
     rgb_led_mask: AtomicU32,
     led_pulse_requests: AtomicU64,
-    diagnostic_activity: AtomicBool,
 
     flux_capacitor_power: i32,
     flux_state: AtomicU8,
@@ -112,10 +111,6 @@ impl SharedState {
                 }
             }
         }
-    }
-
-    fn signal_diagnostic_activity(&self) {
-        self.diagnostic_activity.store(true, Ordering::Relaxed);
     }
 
     fn set_led(&self, index: usize, high: bool) {
@@ -385,7 +380,7 @@ impl ServerHandler for AppHandler {
                 }
 
                 let variant = match data[0] {
-                    0x00 => "waiting\n",
+                    0x00 => "white\n",
                     0x01 => "blue\n",
                     0x02 => "green\n",
                     0x03 => "idle\n",
@@ -714,7 +709,6 @@ async fn main() {
         pending_reset: AtomicU8::new(RESET_NONE),
         session_type: AtomicU8::new(0x01),
         routine_status: AtomicU8::new(ROUTINE_IDLE),
-        diagnostic_activity: AtomicBool::new(false),
         vin: Mutex::new(*VIN),
         dtcs: Mutex::new(vec![
             Dtc {
@@ -756,6 +750,11 @@ async fn main() {
     // Start the OLED thread with its event receiver.
     oled::spawn_status_task(Arc::clone(&shared), oled_rx);
 
+    // Start in Idle mode after every successful application startup.
+    if let Err(e) = fs::write(LED_VARIANT_PATH, "idle\n") {
+        tracing::error!("Failed to initialized LED mode to idle: {e}");
+    }
+
     // RGB sticks show Ethernet connection status
     rgb::spawn_status_task(Arc::clone(&shared));
 
@@ -769,9 +768,6 @@ async fn main() {
             data = format_args!("{:02X?}", &req.data),
             "UDS request"
         );
-
-        // Trigger communication light show
-        shared.signal_diagnostic_activity();
 
         let now = ace_now(&boot_time);
         shared
@@ -912,7 +908,6 @@ mod tests {
             dtcs: Mutex::new(Vec::new()),
             rgb_led_mask: AtomicU32::new(0),
             led_pulse_requests: AtomicU64::new(0),
-            diagnostic_activity: AtomicBool::new(false),
             flux_capacitor_power: 1210,
             flux_state: AtomicU8::new(FLUX_READY),
             last_error: Mutex::new(None),

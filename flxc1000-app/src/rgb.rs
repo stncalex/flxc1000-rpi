@@ -15,7 +15,6 @@ use std::{
 
 use super::SharedState;
 
-const COMMUNICATION_DELAY_MS: u64 = 45;
 const MAIN_LED_COUNT: i32 = 24;
 const SELF_TEST_LED_COUNT: i32 = 8;
 
@@ -25,15 +24,13 @@ const ANIMATION_DELAY_MS: u64 = 90;
 const RGB_REFRESH_MS: u64 = 10;
 const LED_PULSE_DURATION_MS: u64 = 150;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LedVariant {
-    Blue,
-    Green,
-}
+const VARIANT_CONFIG_PATH: &str = "/data/variant.conf";
+const VARIANT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LedMode {
     Waiting,
+    White,
     Blue,
     Green,
     Idle,
@@ -47,33 +44,19 @@ struct IdleColors {
     center: [u8; 4],
 }
 
-impl LedVariant {
-    fn colors(self) -> IdleColors {
-        match self {
-            LedVariant::Blue => IdleColors {
-                background: [5, 15, 30, 0],
-                pulse: [120, 220, 255, 0],
-                trail_1: [50, 120, 200, 0],
-                trail_2: [15, 45, 90, 0],
-                center: [180, 255, 255, 0],
-            },
-
-            LedVariant::Green => IdleColors {
-                background: [5, 30, 5, 0],
-                pulse: [80, 255, 100, 0],
-                trail_1: [30, 180, 50, 0],
-                trail_2: [10, 80, 20, 0],
-                center: [150, 255, 150, 0],
-            },
-        }
+fn idle_colors() -> IdleColors {
+    IdleColors {
+        background: [5, 15, 30, 0],
+        pulse: [120, 220, 255, 0],
+        trail_1: [50, 120, 200, 0],
+        trail_2: [15, 45, 90, 0],
+        center: [180, 255, 255, 0],
     }
 }
 
-const VARIANT_CONFIG_PATH: &str = "/data/variant.conf";
-const VARIANT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-
 fn parse_led_mode(value: &str) -> LedMode {
     match value.trim().to_ascii_lowercase().as_str() {
+        "white" => LedMode::White,
         "blue" => LedMode::Blue,
         "green" => LedMode::Green,
         "idle" => LedMode::Idle,
@@ -135,7 +118,6 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
     let mut next_animation_update = std::time::Instant::now();
     let mut last_mask: Option<u32> = None;
     let mut last_connected: Option<bool> = None;
-    let mut last_diagnostic_active: Option<bool> = None;
     let mut last_self_test_active: Option<bool> = None;
 
     // Track requests to flash LED 1
@@ -183,14 +165,6 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
             }
         }
 
-        let mut diagnostic_active = shared.diagnostic_activity.load(Ordering::Relaxed);
-
-        // Only show diagnostic animations when no explicit mode is selected.
-        if diagnostic_active && mode != LedMode::Waiting {
-            shared.diagnostic_activity.store(false, Ordering::Relaxed);
-            diagnostic_active = false;
-        }
-
         let mut mask = shared.rgb_led_mask.load(Ordering::SeqCst);
         let now = std::time::Instant::now();
         let self_test_active =
@@ -226,9 +200,8 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
         }
 
         // Update the main animation only when needed.
-        let state_changed = last_connected != Some(connected)
-            || last_diagnostic_active != Some(diagnostic_active)
-            || last_self_test_active != Some(self_test_active);
+        let state_changed =
+            last_connected != Some(connected) || last_self_test_active != Some(self_test_active);
 
         let animation_due = now >= next_animation_update;
 
@@ -250,21 +223,10 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
                 }
 
                 next_animation_update = now + Duration::from_millis(ANIMATION_DELAY_MS);
-            } else if diagnostic_active {
-                render_flux_communication(&mut controller, animation_position)?;
-
-                animation_position += 1;
-
-                if animation_position >= BRANCH_LENGTH {
-                    animation_position = 0;
-                    shared.diagnostic_activity.store(false, Ordering::Relaxed);
-                }
-
-                next_animation_update = now + Duration::from_millis(COMMUNICATION_DELAY_MS);
             } else {
                 match mode {
                     LedMode::Waiting => {
-                        render_flux_idle(&mut controller, animation_position, LedVariant::Blue)?;
+                        render_flux_idle(&mut controller, animation_position)?;
 
                         let delay = if animation_position == BRANCH_LENGTH - 1 {
                             ANIMATION_DELAY_MS + 200
@@ -318,8 +280,16 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
                         next_animation_update = now + Duration::from_millis(ANIMATION_DELAY_MS);
                     }
 
+                    LedMode::White => {
+                        for led in controller.leds_mut(0).iter_mut() {
+                            *led = [255, 255, 255, 0];
+                        }
+
+                        next_animation_update = now + Duration::from_millis(ANIMATION_DELAY_MS);
+                    }
+
                     LedMode::Idle => {
-                        render_flux_idle(&mut controller, animation_position, LedVariant::Blue)?;
+                        render_flux_idle(&mut controller, animation_position)?;
 
                         let delay = if animation_position == BRANCH_LENGTH - 1 {
                             ANIMATION_DELAY_MS + 200
@@ -353,7 +323,6 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
             }
 
             last_connected = Some(connected);
-            last_diagnostic_active = Some(diagnostic_active);
             last_self_test_active = Some(self_test_active);
             variant_changed = false;
             frame_updated = true;
@@ -370,12 +339,8 @@ fn run(shared: Arc<SharedState>) -> Result<(), String> {
     }
 }
 
-fn render_flux_idle(
-    controller: &mut rs_ws281x::Controller,
-    position: usize,
-    variant: LedVariant,
-) -> Result<(), String> {
-    let colors = variant.colors();
+fn render_flux_idle(controller: &mut rs_ws281x::Controller, position: usize) -> Result<(), String> {
+    let colors = idle_colors();
     let leds = controller.leds_mut(0);
 
     // Soft background glow
@@ -426,63 +391,6 @@ fn render_flux_idle(
         leds[0] = colors.center; // Red stick
         leds[15] = colors.center; // Green stick
         leds[16] = colors.center; // Blue stick
-    }
-
-    Ok(())
-}
-
-fn render_flux_communication(
-    controller: &mut rs_ws281x::Controller,
-    position: usize,
-) -> Result<(), String> {
-    let leds = controller.leds_mut(0);
-
-    // Dark blue background
-    for led in leds.iter_mut() {
-        *led = [3, 10, 20, 0];
-    }
-
-    for branch in 0..BRANCH_COUNT {
-        let base = branch * BRANCH_LENGTH;
-
-        // Stick 3 is mounted in the opposite direction
-        let current = if branch == 2 {
-            base + (BRANCH_LENGTH - 1 - position)
-        } else {
-            base + position
-        };
-
-        // Bright communication pulse
-        leds[current] = [180, 255, 255, 0];
-
-        // First trail LED
-        if position >= 1 {
-            let trail_1 = if branch == 2 {
-                base + (BRANCH_LENGTH - position)
-            } else {
-                base + position - 1
-            };
-
-            leds[trail_1] = [80, 200, 255, 0];
-        }
-
-        // Second trail LED
-        if position >= 2 {
-            let trail_2 = if branch == 2 {
-                base + (BRANCH_LENGTH + 1 - position)
-            } else {
-                base + position - 2
-            };
-
-            leds[trail_2] = [30, 90, 160, 0];
-        }
-    }
-
-    // Bright center flash
-    if position == BRANCH_LENGTH - 1 {
-        leds[7] = [255, 255, 255, 0];
-        leds[15] = [255, 255, 255, 0];
-        leds[16] = [255, 255, 255, 0];
     }
 
     Ok(())
