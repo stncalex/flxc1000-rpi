@@ -549,10 +549,15 @@ impl SecurityProvider for AppSecurity {
 // ---------------------------------------------------------------------------
 
 fn handle_clear_dtc(data: &[u8], shared: &SharedState) -> Vec<u8> {
-    if data.len() < 4 {
+    if data.len() != 4 {
         return vec![0x7F, 0x14, 0x13]; // NRC incorrectMessageLength
     }
     let group = u32::from_be_bytes([0x00, data[1], data[2], data[3]]);
+
+    if group != 0xFFFFFF {
+        return vec![0x7F, 0x14, 0x31];
+    }
+
     tracing::info!(
         group = format_args!("0x{:06X}", group),
         "ClearDiagnosticInformation"
@@ -569,7 +574,7 @@ fn handle_read_dtc(data: &[u8], shared: &SharedState) -> Vec<u8> {
     match report_type {
         0x02 => {
             // reportDTCByStatusMask
-            if data.len() < 3 {
+            if data.len() != 3 {
                 return vec![0x7F, 0x19, 0x13];
             }
             let status_mask = data[2];
@@ -1058,5 +1063,134 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert_eq!(result.unwrap(), 0);
+    }
+
+
+
+
+
+
+
+    #[test]
+    fn test_read_dtc_rejects_extra_bytes() {
+        let shared = test_shared_state();
+
+        let response = handle_read_dtc(&[0x19, 0x02, 0xFF, 0x00], &shared);
+
+        assert_eq!(response, vec![0x7F, 0x19, 0x13]);
+    }
+
+    #[test]
+    fn test_read_dtc_returns_matching_dtcs() {
+        let shared = test_shared_state();
+
+        {
+            let mut dtcs = shared.dtcs.lock().unwrap();
+
+            dtcs.push(Dtc {
+                code: DTC_CODE1,
+                status: 0x2F,
+            });
+
+            dtcs.push(Dtc {
+                code: DTC_CODE2,
+                status: 0x24,
+            });
+        }
+
+        let response = handle_read_dtc(&[0x19, 0x02, 0xFF], &shared);
+
+        assert_eq!(
+            response,
+            vec![
+                0x59, 0x02, 0xFF,
+                0x01, 0xE2, 0x40, 0x2F,
+                0x03, 0x94, 0x47, 0x24,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_clear_dtc_rejects_extra_bytes() {
+        let shared = test_shared_state();
+
+        let response = handle_clear_dtc(&[0x14, 0xFF, 0xFF, 0xFF, 0x00], &shared);
+
+        assert_eq!(response, vec![0x7F, 0x14, 0x13]);
+    }
+
+    #[test]
+    fn test_clear_dtc_rejects_unsupported_group() {
+        let shared = test_shared_state();
+
+        {
+            let mut dtcs = shared.dtcs.lock().unwrap();
+
+            dtcs.push(Dtc {
+                code: DTC_CODE1,
+                status: 0x2F,
+            });
+        }
+
+        let response = handle_clear_dtc(&[0x14, 0x00, 0x00, 0x01], &shared);
+
+        assert_eq!(response, vec![0x7F, 0x14, 0x31]);
+
+        // A rejected request must not delete existing DTCs.
+        assert_eq!(shared.dtcs.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_clear_dtc_removes_all_dtcs() {
+        let shared = test_shared_state();
+
+        {
+            let mut dtcs = shared.dtcs.lock().unwrap();
+
+            dtcs.push(Dtc {
+                code: DTC_CODE1,
+                status: 0x2F,
+            });
+
+            dtcs.push(Dtc {
+                code: DTC_CODE2,
+                status: 0x24,
+            });
+        }
+
+        // Clear all DTCs using group 0xFFFFFF.
+        let response = handle_clear_dtc(&[0x14, 0xFF, 0xFF, 0xFF], &shared);
+
+        // Verify the positive UDS response.
+        assert_eq!(response, vec![0x54]);
+
+        // Verify both DTCs were removed.
+        assert!(shared.dtcs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_read_dtc_filters_by_status_mask() {
+        let shared = test_shared_state();
+
+        {
+            let mut dtcs = shared.dtcs.lock().unwrap();
+
+            dtcs.push(Dtc {
+                code: DTC_CODE1,
+                status: 0x2F,
+            });
+
+            dtcs.push(Dtc {
+                code: DTC_CODE2,
+                status: 0x24,
+            });
+        }
+
+        let response = handle_read_dtc(&[0x19, 0x02, 0x01], &shared);
+
+        assert_eq!(
+            response,
+            vec![0x59, 0x02, 0xFF, 0x01, 0xE2, 0x40, 0x2F]
+        );
     }
 }
