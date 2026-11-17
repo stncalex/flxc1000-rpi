@@ -45,3 +45,8 @@ ace-sim = { git = "https://github.com/samp-reston/ace.git", rev = "0706bef625fbd
 ] }
 
 flxc1000-doip = { path = "flxc1000-doip" }
+
+[patch."https://github.com/samp-reston/ace.git"]
+ace-server = { path = "../ace/crates/ace-server" }
+ace-doip = { path = "../ace/crates/ace-doip" }
+ace-sim = { path = "../ace/crates/ace-sim" }

@@ -5,7 +5,6 @@ version = 4
 [[package]]
 name = "ace-core"
 version = "0.2.1"
-source = "git+https://github.com/samp-reston/ace.git?rev=0706bef625fbde1d8fadbd84ea21bb8ee650f7e4#0706bef625fbde1d8fadbd84ea21bb8ee650f7e4"
 dependencies = [
  "bytes",
  "heapless",
@@ -14,7 +13,6 @@ dependencies = [
 [[package]]
 name = "ace-macros"
 version = "0.2.1"
-source = "git+https://github.com/samp-reston/ace.git?rev=0706bef625fbde1d8fadbd84ea21bb8ee650f7e4#0706bef625fbde1d8fadbd84ea21bb8ee650f7e4"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -25,7 +23,6 @@ dependencies = [
 [[package]]
 name = "ace-proto"
 version = "0.2.1"
-source = "git+https://github.com/samp-reston/ace.git?rev=0706bef625fbde1d8fadbd84ea21bb8ee650f7e4#0706bef625fbde1d8fadbd84ea21bb8ee650f7e4"
 dependencies = [
  "ace-core",
  "heapless",
@@ -34,7 +31,6 @@ dependencies = [
 [[package]]
 name = "ace-server"
 version = "0.2.1"
-source = "git+https://github.com/samp-reston/ace.git?rev=0706bef625fbde1d8fadbd84ea21bb8ee650f7e4#0706bef625fbde1d8fadbd84ea21bb8ee650f7e4"
 dependencies = [
  "ace-core",
  "ace-proto",
@@ -46,7 +42,6 @@ dependencies = [
 [[package]]
 name = "ace-sim"
 version = "0.2.1"
-source = "git+https://github.com/samp-reston/ace.git?rev=0706bef625fbde1d8fadbd84ea21bb8ee650f7e4#0706bef625fbde1d8fadbd84ea21bb8ee650f7e4"
 dependencies = [
  "ace-core",
  "heapless",
@@ -55,7 +50,6 @@ dependencies = [
 [[package]]
 name = "ace-uds"
 version = "0.2.1"
-source = "git+https://github.com/samp-reston/ace.git?rev=0706bef625fbde1d8fadbd84ea21bb8ee650f7e4#0706bef625fbde1d8fadbd84ea21bb8ee650f7e4"
 dependencies = [
  "ace-core",
  "ace-macros",
@@ -1005,3 +999,7 @@ checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
 ]
+
+[[patch.unused]]
+name = "ace-doip"
+version = "0.2.1"
