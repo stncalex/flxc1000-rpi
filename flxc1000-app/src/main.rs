@@ -438,6 +438,11 @@ impl ServerHandler for AppHandler {
                     return Err(BuiltinNrc::RequestSequenceError);
                 }
                 tracing::info!("RoutineControl SelfTest Start - 24-LED cascade on GPIO18");
+
+                // Notify the Oled that SelfTest has started.
+                self.shared
+                    .show_diagnostic("SelfTest", "Performing SelfTest...");
+
                 let shared = Arc::clone(&self.shared);
                 std::thread::spawn(move || {
                     shared.led_cascade_test();
@@ -1065,12 +1070,6 @@ mod tests {
         assert_eq!(result.unwrap(), 0);
     }
 
-
-
-
-
-
-
     #[test]
     fn test_read_dtc_rejects_extra_bytes() {
         let shared = test_shared_state();
@@ -1102,11 +1101,7 @@ mod tests {
 
         assert_eq!(
             response,
-            vec![
-                0x59, 0x02, 0xFF,
-                0x01, 0xE2, 0x40, 0x2F,
-                0x03, 0x94, 0x47, 0x24,
-            ]
+            vec![0x59, 0x02, 0xFF, 0x01, 0xE2, 0x40, 0x2F, 0x03, 0x94, 0x47, 0x24,]
         );
     }
 
@@ -1188,9 +1183,6 @@ mod tests {
 
         let response = handle_read_dtc(&[0x19, 0x02, 0x01], &shared);
 
-        assert_eq!(
-            response,
-            vec![0x59, 0x02, 0xFF, 0x01, 0xE2, 0x40, 0x2F]
-        );
+        assert_eq!(response, vec![0x59, 0x02, 0xFF, 0x01, 0xE2, 0x40, 0x2F]);
     }
 }
